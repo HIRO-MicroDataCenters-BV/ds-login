@@ -16,28 +16,38 @@ step.
 - [x] CI workflow (lint, type-check, tests)
 - [x] Tests for health, JWKs, ACDC parser, challenge store
 
-## Phase 1b (short follow-ups, open PRs)
+## Phase 1b — direct witness KEL + IPEX grant verify (LANDED)
 
-- [ ] Watcher-side `qry` message construction (`core/kel_resolver.py`)
-- [ ] Signing-key secret loading hardened (test the Kubernetes secret mount path)
-- [ ] `/login/revoke` + token-revocation list consulted by `ds-auth`
+The verifier accepts credentials from **any DKMS-anchored issuer**: witness
+URLs are extracted from the OOBIs embedded in each incoming IPEX grant and
+queried directly. Open-federation model, no Hiro-side watcher required on
+the verify path.
 
-## Phase 2 (ACDC hardening — the credential chain)
+- [x] `witness_client.py` — HTTP client for OOBI + TEL endpoints
+- [x] `ipex_grant.py` — parse grant envelope, extract issuer OOBIs
+- [x] `kel_resolver.resolve_from_oobis` — direct witness query, in-process
+      KERIpy CESR parse via a transient `Baser` + `Kevery`
+- [x] `acdc_verifier.verify_grant` — subject binding + issuer sig against
+      issuer's live KEL
+- [x] API: `VerifyRequest.credential_grant` field alongside the legacy
+      `credential` field (bare ACDC kept for Phase 0 wallets during migration)
 
-- [ ] **Issuer signature verification**  
-      Verify the ACDC envelope's signature against the issuer AID's KEL.
-      Requires the KelResolver to be able to resolve ANY AID (not just the
-      user's), which means the watcher must be subscribed to the issuer's
-      witnesses too (or trust-list the issuer's witness URLs).
-- [ ] **TEL (Transaction Event Log) revocation check**  
-      Query the issuer's registry TEL for the credential SAID. If revoked
-      → reject.
-- [ ] **Schema SAID verification**  
-      Verify the credential's `s` field points to a known schema (prevents
-      claim-shape forgery).
-- [ ] **Trust-list enforcement**  
-      Credentials from issuers not on the configured trust list are
-      rejected. Currently a soft-warn.
+## Phase 1c — remaining hardening (open PRs)
+
+- [ ] **TEL revocation check** — the Phase 1b stub returns True iff a
+      witness responded with any TEL body for the credential SAID; replace
+      with full event-stream parse so revocation decisions are real.
+      Requires pinning the keriox 0.18.0 TEL endpoint shape upstream.
+- [ ] **Signed `qry` to witness** — the Phase 1b path uses the unsigned
+      OOBI GET, which returns a point-in-time KEL snapshot. A signed `qry`
+      lets us ask for "latest state since seq N" and get authenticated
+      receipts. Needs ds-login to possess its own KERI AID + Habery.
+- [ ] **Schema SAID verification** — resolve `credential.s` against a
+      trusted-schema registry (prevents claim-shape forgery).
+- [ ] **Signing-key secret loading** — exercise the Kubernetes secret mount
+      path in staging; current code works but the Helm wiring is untested
+      end-to-end.
+- [ ] **`/login/revoke`** + token-revocation list consulted by `ds-auth`.
 
 ## Phase 3 (operational hardening)
 

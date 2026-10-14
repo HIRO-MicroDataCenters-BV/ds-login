@@ -23,12 +23,29 @@ class VerifyRequest(BaseModel):
     aid: str
     nonce_hex: str
     signature_qb64: str = Field(..., description="CESR-encoded signature (qb64)")
+
+    # Phase 1b path — any DKMS-anchored issuer. Verifier resolves the
+    # issuer's KEL from the OOBIs inside the grant and verifies the issuer's
+    # signature over the ACDC. This is the open-federation model.
+    credential_grant: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "An IPEX grant from the issuer. Must include: acdc, iss_sig, "
+            "iss_oobis.witness_urls. Fully verified: subject binding, issuer "
+            "signature against the issuer's live KEL, (optional) TEL "
+            "revocation check."
+        ),
+    )
+
+    # Phase 0 / backward-compat path — bare ACDC with no OOBIs. The server
+    # does subject binding only and logs a warning; the full chain cannot
+    # be verified. Reject this in production once all wallets emit grants.
     credential: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Optional ACDC credential binding role, institute, name, email to this AID. "
-            "If omitted, the server falls back to the AID's KEL-attached profile for "
-            "development; production requires a credential."
+            "Deprecated. Bare ACDC envelope used by Phase 0 wallets. Subject "
+            "binding only — issuer signature NOT verified. Prefer "
+            "credential_grant."
         ),
     )
 
