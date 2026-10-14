@@ -15,7 +15,6 @@ from .rest_api.routes.jwks import router as jwks_router
 from .rest_api.routes.login import router as login_router
 from .settings import get_settings
 
-
 log = logging.getLogger(__name__)
 
 
@@ -26,14 +25,15 @@ async def lifespan(app: FastAPI):
 
     log.info("ds-login starting · env=%s watcher=%s", settings.environment, settings.watcher_url)
 
-    # Build singletons once, store on app.state for dependency injection
+    # Build singletons once, store on app.state for dependency injection.
+    # Order matters: the ACDC verifier depends on the KEL resolver.
     app.state.jwt_signer = JwtSigner(settings)
     app.state.kel_resolver = KelResolver(settings)
     app.state.challenge_store = ChallengeStore(
         ttl_seconds=settings.challenge_ttl_seconds,
         nonce_bytes=settings.challenge_bytes,
     )
-    app.state.acdc_verifier = AcdcVerifier()
+    app.state.acdc_verifier = AcdcVerifier(kel_resolver=app.state.kel_resolver)
 
     yield
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import binascii
 import logging
-import time
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -11,7 +10,7 @@ from ...core.acdc_verifier import AcdcVerifier, CredentialVerificationError
 from ...core.challenge_store import ChallengeStore
 from ...core.jwt_signer import JwtSigner
 from ...core.kel_resolver import KelResolutionError, KelResolver
-from ...core.signature_verifier import SignatureVerifier, SignatureVerificationError
+from ...core.signature_verifier import SignatureVerificationError, SignatureVerifier
 from ...settings import Settings
 from ..api_models import (
     ChallengeRequest,
@@ -27,7 +26,6 @@ from ..depends import (
     settings_dep,
     signature_verifier_dep,
 )
-
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/login", tags=["login"])
@@ -115,12 +113,32 @@ def login_verify(
     email: str | None = None
     credential_said: str | None = None
 
-    if body.credential is not None:
+    if body.credential_grant is not None:
+        # Preferred path — Phase 1b open-federation IPEX grant. Verifies
+        # issuer signature against the issuer's live KEL at the OOBIs
+        # embedded in the grant.
+        try:
+            verified_cred = cred_verifier.verify_grant(
+                body.credential_grant, subject_aid=body.aid
+            )
+        except CredentialVerificationError as e:
+            return VerifyResponse(
+                aid=body.aid, verified=False, reason=f"credential rejected: {e}"
+            )
+        role = verified_cred.attributes.get("role")
+        institute = verified_cred.attributes.get("institute")
+        name = verified_cred.attributes.get("name")
+        email = verified_cred.attributes.get("email")
+        credential_said = verified_cred.said
+    elif body.credential is not None:
+        # Legacy path — bare ACDC, subject binding only. Logs a warning;
+        # production should reject this once all wallets emit grants.
         try:
             verified_cred = cred_verifier.verify(body.credential, subject_aid=body.aid)
         except CredentialVerificationError as e:
-            return VerifyResponse(aid=body.aid, verified=False, reason=f"credential rejected: {e}")
-
+            return VerifyResponse(
+                aid=body.aid, verified=False, reason=f"credential rejected: {e}"
+            )
         role = verified_cred.attributes.get("role")
         institute = verified_cred.attributes.get("institute")
         name = verified_cred.attributes.get("name")
