@@ -42,12 +42,16 @@ spec:
               value: {{ .Values.jwt.audience | quote }}
             - name: DS__JWT_TTL_SECONDS
               value: {{ .Values.jwt.ttlSeconds | quote }}
+            {{- if .Values.jwt.signingKeySecretName }}
             - name: DS__JWT_PRIVATE_KEY_PEM_PATH
               value: "/etc/ds-login/signing-key/{{ .Values.jwt.signingKeySecretField }}"
+            {{- end }}
+          {{- if .Values.jwt.signingKeySecretName }}
           volumeMounts:
             - name: signing-key
               mountPath: /etc/ds-login/signing-key
               readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health-check/
@@ -62,10 +66,12 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.jwt.signingKeySecretName }}
       volumes:
         - name: signing-key
           secret:
             secretName: {{ .Values.jwt.signingKeySecretName }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

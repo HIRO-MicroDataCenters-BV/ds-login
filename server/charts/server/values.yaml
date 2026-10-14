@@ -31,9 +31,17 @@ jwt:
   issuer: "ds-login"
   audience: "hiro-services"
   ttlSeconds: 900
-  # The RSA signing key lives in a secret. Set to the name of a Secret that
-  # contains a 'tls.key' or 'private.pem' entry with a PKCS8 PEM-encoded key.
-  signingKeySecretName: "ds-login-signing-key"
+  # RSA signing key for JWT issuance.
+  #
+  #   signingKeySecretName: "my-secret"   → the chart mounts that Secret at
+  #     /etc/ds-login/signing-key/ and ds-login reads the key from
+  #     signingKeySecretField. JWTs survive pod restarts.
+  #
+  #   signingKeySecretName: ""            → the chart renders no volume and
+  #     no DS__JWT_PRIVATE_KEY_PEM_PATH env var. ds-login generates a
+  #     transient RSA key in memory at startup. Each pod restart invalidates
+  #     every active JWT. Fine for demos; NOT for production.
+  signingKeySecretName: ""
   signingKeySecretField: "private.pem"
 
 environment: "production"   # local / dev / staging / production
