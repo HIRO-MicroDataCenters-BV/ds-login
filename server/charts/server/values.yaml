@@ -1,0 +1,57 @@
+image:
+  repository: ghcr.io/hiro-microdatacenters-bv/ds-login
+  pullPolicy: IfNotPresent
+  tag: ""     # defaults to Chart.appVersion when empty
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: nginx
+  host: ds-login.local
+  tls:
+    enabled: false
+    secretName: ""
+
+# Backend URLs — WHERE DOES DKMS LIVE?
+# These default to the keriox stack running inside the same cluster.
+# Override per partner node via the Fleet GitOps values overlay.
+dkms:
+  watcherUrl: "http://keriox-watcher:3235"
+  witnessUrls:
+    - "http://keriox-witness1:3232"
+    - "http://keriox-witness2:3233"
+    - "http://keriox-witness3:3234"
+
+jwt:
+  issuer: "ds-login"
+  audience: "hiro-services"
+  ttlSeconds: 900
+  # The RSA signing key lives in a secret. Set to the name of a Secret that
+  # contains a 'tls.key' or 'private.pem' entry with a PKCS8 PEM-encoded key.
+  signingKeySecretName: "ds-login-signing-key"
+  signingKeySecretField: "private.pem"
+
+environment: "production"   # local / dev / staging / production
+logLevel: "INFO"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+serviceAccount:
+  create: true
+  name: ""

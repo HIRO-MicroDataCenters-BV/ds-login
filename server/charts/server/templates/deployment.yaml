@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ds-login.fullname" . }}
+  labels:
+    {{- include "ds-login.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ds-login.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ds-login.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ds-login.serviceAccountName" . }}
+      containers:
+        - name: ds-login
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: DS__ENVIRONMENT
+              value: {{ .Values.environment | quote }}
+            - name: DS__LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            - name: DS__WATCHER_URL
+              value: {{ .Values.dkms.watcherUrl | quote }}
+            - name: DS__WITNESS_URLS
+              value: {{ .Values.dkms.witnessUrls | toJson | quote }}
+            - name: DS__JWT_ISSUER
+              value: {{ .Values.jwt.issuer | quote }}
+            - name: DS__JWT_AUDIENCE
+              value: {{ .Values.jwt.audience | quote }}
+            - name: DS__JWT_TTL_SECONDS
+              value: {{ .Values.jwt.ttlSeconds | quote }}
+            - name: DS__JWT_PRIVATE_KEY_PEM_PATH
+              value: "/etc/ds-login/signing-key/{{ .Values.jwt.signingKeySecretField }}"
+          volumeMounts:
+            - name: signing-key
+              mountPath: /etc/ds-login/signing-key
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health-check/
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health-check/
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.jwt.signingKeySecretName }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
