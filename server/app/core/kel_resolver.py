@@ -1,24 +1,32 @@
 """Resolves an AID → its KEL + current public key.
 
-Primary path: query the keriox watcher. The watcher is already subscribed to
-the known witnesses, caches KELs locally, and shields this service from
-witness unreachability.
+Primary path (Phase 1b): hit the OOBI URL(s) the caller supplies (usually
+pulled off an inbound IPEX grant). The witness returns a CESR stream of the
+AID's KEL events; we parse it with KERIpy to a transient in-memory ``Kever``
+and extract the current signing key, witness set and sequence number.
 
-Fallback path (dev / early-stage deployment): read pre-exported KEL metadata
-from disk. Fallback is permitted only when `kel_disk_fallback_dir` is set and
-`environment != "production"`.
+Legacy paths (still available, used only when enabled):
+
+* **Watcher**: configured Hiro-side watcher. Useful once we deploy a watcher
+  per site and want it to cache KEL state across requests.
+* **Disk**: pre-exported JSON KELs. Dev-only; forbidden when
+  ``environment == "production"``.
+
+The resolver returns a flat dict rather than a KERIpy object so callers
+don't need KERIpy on their import path.
 """
 from __future__ import annotations
 
 import json
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from ..settings import Settings
-
+from .witness_client import OobiResult, WitnessClient, WitnessUnreachableError
 
 log = logging.getLogger(__name__)
 
@@ -28,35 +36,34 @@ class KelResolutionError(Exception):
 
 
 class KelResolver:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        witness_client: WitnessClient | None = None,
+    ) -> None:
         self.settings = settings
+        self.witness = witness_client or WitnessClient()
 
-    # ─── public API ─────────────────────────────────────────────────
+    # ─── public API ─────────────────────────────────────────────────────
+
     def resolve(self, aid: str) -> dict[str, Any]:
-        """Return a dict describing the current state of the AID's KEL.
+        """Legacy single-AID resolve (watcher-first, disk fallback).
 
-        Shape:
-            {
-              "aid": "<AID>",
-              "current_public_keys": ["Dxxx..."],
-              "witnesses": ["Bxxx...", ...],
-              "sequence_number": 0,
-              "source": "watcher" | "disk",
-              # optional user_profile from the dev-mode disk export
-              "user_profile": {...}?
-            }
+        Preserved so the challenge endpoint — which only knows the user's AID
+        and has no OOBIs for them yet — can still do a liveness check against
+        a locally-configured watcher. New callers verifying inbound grants
+        should use ``resolve_from_oobis`` instead.
         """
-        # Try watcher first
-        try:
-            return self._resolve_via_watcher(aid)
-        except Exception as e:
-            log.warning("watcher resolution failed for %s: %s", aid, e)
+        if self.settings.watcher_url:
+            try:
+                return self._resolve_via_watcher(aid)
+            except (KelResolutionError, httpx.HTTPError) as e:
+                log.warning("watcher resolution failed for %s: %s", aid, e)
 
-        # Fallback — only if explicitly enabled and not in production
         if self.settings.kel_disk_fallback_dir and self.settings.environment != "production":
             try:
                 return self._resolve_via_disk(aid)
-            except Exception as e:
+            except (KelResolutionError, OSError) as e:
                 log.warning("disk-fallback resolution failed for %s: %s", aid, e)
 
         raise KelResolutionError(
@@ -64,55 +71,139 @@ class KelResolver:
             f"and no usable fallback"
         )
 
-    # ─── watcher path ───────────────────────────────────────────────
-    def _resolve_via_watcher(self, aid: str) -> dict[str, Any]:
-        """Query the watcher for the AID's KEL.
+    def resolve_from_oobis(
+        self,
+        aid: str,
+        oobi_urls: list[str],
+    ) -> dict[str, Any]:
+        """Resolve ``aid``'s KEL by hitting its OOBI URLs directly.
 
-        NOTE: keriox's HTTP `/query` endpoint takes a signed KERI `qry`
-        message; constructing one requires access to the service's own AID
-        key. For the first ds-login commit we hit the watcher's cache
-        indirectly through a thin query helper endpoint that the watcher
-        exposes locally. If the watcher doesn't support the simple GET
-        shape we fall out of this method via the exception handler above
-        and the caller tries the disk fallback.
-
-        TODO (Phase 1 proper): construct a signed `qry` event and POST it to
-        the watcher's /query endpoint; parse the KEL out of the CESR
-        response and extract the current signing key.
+        Tries each URL in order; returns the first KEL that parses cleanly
+        and whose state names ``aid``. Raises ``KelResolutionError`` if
+        every URL fails.
         """
-        # Minimal probe — ping watcher is up at all
+        if not oobi_urls:
+            raise KelResolutionError(
+                f"no OOBI URLs supplied for {aid!r}; cannot resolve KEL"
+            )
+
+        last_error: Exception | None = None
+        for url in oobi_urls:
+            try:
+                oobi = self.witness.fetch_oobi(url)
+            except WitnessUnreachableError as e:
+                log.warning("OOBI unreachable: %s", e)
+                last_error = e
+                continue
+
+            try:
+                state = _kel_state_from_oobi(oobi, aid)
+            except KelResolutionError as e:
+                log.warning("OOBI %s returned un-parseable KEL: %s", url, e)
+                last_error = e
+                continue
+
+            state["source"] = "oobi"
+            state["oobi_url"] = url
+            return state
+
+        raise KelResolutionError(
+            f"all {len(oobi_urls)} OOBI URL(s) failed for {aid!r}; "
+            f"last error: {last_error}"
+        )
+
+    # ─── legacy watcher path (unsigned, Phase 0 compat) ─────────────────
+
+    def _resolve_via_watcher(self, aid: str) -> dict[str, Any]:
+        """Thin probe against a configured watcher's ``/info`` endpoint.
+
+        Kept so the challenge flow can do a quick "is the watcher up"
+        check for the Phase 0 UX. Full-fat watcher-side ``qry`` lives in a
+        separate PR — not required for the open-federation model, which
+        resolves KELs directly from grant OOBIs.
+        """
         base = self.settings.watcher_url.rstrip("/")
         r = httpx.get(f"{base}/info", timeout=3.0)
         r.raise_for_status()
-
-        # TODO: real KEL query goes here. Until then signal to the caller
-        # that the watcher is reachable but the query path isn't wired yet.
-        raise NotImplementedError(
-            "watcher-side KEL query not yet implemented — use disk fallback "
-            "or set up a dedicated query service."
+        raise KelResolutionError(
+            f"watcher {base} is reachable but direct KEL query not wired yet; "
+            "callers verifying inbound grants should use resolve_from_oobis"
         )
 
-    # ─── disk fallback (dev only) ───────────────────────────────────
+    # ─── disk fallback (dev only) ───────────────────────────────────────
+
     def _resolve_via_disk(self, aid: str) -> dict[str, Any]:
         """Read a JSON KEL export from the fallback directory.
 
-        File naming: `<alias>.json` with `{"aid": "...", "current_public_keys": [...], ...}`.
-        The resolver iterates the directory until it finds one with the
-        matching AID.
+        File naming: ``<alias>.json`` with ``{"aid": ..., "current_public_keys": [...], ...}``.
         """
-        root = Path(self.settings.kel_disk_fallback_dir)  # type: ignore[arg-type]
+        if self.settings.kel_disk_fallback_dir is None:
+            raise KelResolutionError("disk fallback not configured")
+
+        root = Path(self.settings.kel_disk_fallback_dir)
         if not root.exists():
             raise KelResolutionError(f"disk fallback dir does not exist: {root}")
 
         for meta in root.glob("*.json"):
             try:
                 data = json.loads(meta.read_text(encoding="utf-8"))
-            except Exception:
+            except json.JSONDecodeError:
                 continue
             if data.get("aid") == aid:
                 data["source"] = "disk"
-                return data
+                return data  # type: ignore[no-any-return]
 
         raise KelResolutionError(
             f"no KEL export in {root} matches AID {aid!r}"
         )
+
+
+# ─── KERIpy-backed CESR parse ───────────────────────────────────────────
+
+
+def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
+    """Parse an OOBI CESR response into a flat KEL state dict.
+
+    Uses KERIpy's ``Kevery`` + a transient in-memory ``Baser`` so no
+    persistent state leaks between requests. Raises on any parse failure or
+    if the resulting state doesn't name ``aid``.
+    """
+    try:
+        from keri.core import eventing, parsing
+        from keri.db import basing
+    except Exception as e:  # pysodium can raise TypeError on Windows
+        raise KelResolutionError(
+            f"KERIpy unavailable; cannot parse OOBI stream: {e}"
+        ) from e
+
+    if not oobi.body:
+        raise KelResolutionError(f"OOBI {oobi.url} returned empty body")
+
+    # Transient LMDB: name scopes the files, temp=True wipes on close,
+    # headDirPath keeps them out of the user's HOME in dev.
+    with (
+        tempfile.TemporaryDirectory(prefix="ds-login-kel-") as tmp,
+        basing.openDB(name="ds-login-kel", temp=True, headDirPath=tmp) as db,
+    ):
+        kvy = eventing.Kevery(db=db, lax=True)
+        parser = parsing.Parser(kvy=kvy)
+        try:
+            parser.parse(ims=bytearray(oobi.body))
+        except Exception as e:  # KERIpy raises many ad-hoc exception types
+            raise KelResolutionError(
+                f"KERIpy failed to parse OOBI {oobi.url}: {e}"
+            ) from e
+
+        kever = kvy.kevers.get(aid)
+        if kever is None:
+            raise KelResolutionError(
+                f"OOBI {oobi.url} did not include a KEL for {aid!r}; "
+                f"got {sorted(kvy.kevers.keys())}"
+            )
+
+        return {
+            "aid": aid,
+            "current_public_keys": [v.qb64 for v in kever.verfers],
+            "witnesses": list(kever.wits),
+            "sequence_number": kever.sn,
+        }
