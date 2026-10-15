@@ -5,6 +5,10 @@ metadata:
   name: {{ include "ds-login.fullname" . }}
   labels:
     {{- include "ds-login.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}

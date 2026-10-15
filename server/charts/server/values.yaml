@@ -12,6 +12,7 @@ service:
 ingress:
   enabled: false
   className: nginx
+  annotations: {}
   host: ds-login.local
   tls:
     enabled: false
