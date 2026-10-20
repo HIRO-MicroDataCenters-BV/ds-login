@@ -82,11 +82,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Compute a versioned+SHA tag that matches every other ds-* service
+      # (e.g. ds-contract-generator:0.1.0-dev.11.develop.0cce022a). Stable
+      # + immutable, so ds-gitops overlays can pin to it with
+      # pullPolicy: IfNotPresent and never hit ghcr's anonymous rate-limit
+      # on pod restart.
+      - name: Compute versioned tag
+        id: version
+        run: |
+          APP_VERSION=$(sed -nE 's/^appVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' \
+            server/charts/server/Chart.yaml)
+          SHORT_SHA=${GITHUB_SHA:0:8}
+          VERSIONED="${APP_VERSION}-dev.${GITHUB_RUN_NUMBER}.${GITHUB_REF_NAME}.${SHORT_SHA}"
+          echo "versioned=${VERSIONED}" >> "$GITHUB_OUTPUT"
+          echo "Built tag: ${VERSIONED}"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.DOCKER_IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=,format=long
+            type=raw,value=${{ steps.version.outputs.versioned }}
 
       - name: Build + push
         uses: docker/build-push-action@v5
