@@ -144,7 +144,11 @@ class KelResolver:
             )
 
         state = _kel_state_from_oobi(
-            OobiResult(url=f"{base}/oobi/{aid}", body=oobi_resp.content),
+            OobiResult(
+                url=f"{base}/oobi/{aid}",
+                content_type=oobi_resp.headers.get("content-type", "application/cesr"),
+                body=oobi_resp.content,
+            ),
             aid,
         )
         state["source"] = "watcher"
