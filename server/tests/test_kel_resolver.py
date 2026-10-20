@@ -169,10 +169,11 @@ def test_resolve_via_watcher_parses_oobi_stream(issuer_cesr_stream, monkeypatch)
     aid, cesr = issuer_cesr_stream
 
     def fake_get(url, *, timeout=None):  # noqa: ARG001
+        req = httpx.Request("GET", url)
         if url.endswith("/info"):
-            return httpx.Response(200, text='{"version":"0.17.13"}')
+            return httpx.Response(200, text='{"version":"0.17.13"}', request=req)
         if url.endswith(f"/oobi/{aid}"):
-            return httpx.Response(200, content=cesr)
+            return httpx.Response(200, content=cesr, request=req)
         raise AssertionError(f"unexpected GET {url}")
 
     monkeypatch.setattr(httpx, "get", fake_get)
@@ -192,9 +193,10 @@ def test_resolve_via_watcher_raises_when_watcher_lacks_the_aid(monkeypatch):
     import httpx
 
     def fake_get(url, *, timeout=None):  # noqa: ARG001
+        req = httpx.Request("GET", url)
         if url.endswith("/info"):
-            return httpx.Response(200, text='{"version":"0.17.13"}')
-        return httpx.Response(200, content=b"")
+            return httpx.Response(200, text='{"version":"0.17.13"}', request=req)
+        return httpx.Response(200, content=b"", request=req)
 
     monkeypatch.setattr(httpx, "get", fake_get)
 
