@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -11,6 +12,11 @@ class Challenge:
     aid: str
     nonce: bytes
     issued_at: float
+    # KEL state resolved at challenge issue time, cached so verify doesn't
+    # re-fetch (saves one OOBI round-trip + keeps the key the user signed
+    # against identical to the key we check with). None when the resolver
+    # didn't have a reachable path at challenge time (verify will retry).
+    kel: dict[str, Any] | None = field(default=None)
 
 
 class ChallengeStore:
@@ -19,8 +25,13 @@ class ChallengeStore:
         self.nonce_bytes = nonce_bytes
         self._store: dict[str, Challenge] = {}
 
-    def issue(self, aid: str) -> Challenge:
-        c = Challenge(aid=aid, nonce=secrets.token_bytes(self.nonce_bytes), issued_at=time.time())
+    def issue(self, aid: str, kel: dict[str, Any] | None = None) -> Challenge:
+        c = Challenge(
+            aid=aid,
+            nonce=secrets.token_bytes(self.nonce_bytes),
+            issued_at=time.time(),
+            kel=kel,
+        )
         self._store[aid] = c
         return c
 
