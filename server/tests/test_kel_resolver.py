@@ -157,3 +157,56 @@ def test_legacy_resolve_fails_cleanly_without_watcher_or_disk():
     r = KelResolver(_settings())
     with pytest.raises(KelResolutionError, match="watcher unreachable"):
         r.resolve("EIssuer")
+
+
+# ─── watcher-path tests (fix for Rahul audit #7) ───────────────────────
+
+
+def test_resolve_via_watcher_parses_oobi_stream(issuer_cesr_stream, monkeypatch):
+    """Happy path: /info OK, /oobi/<aid> returns the KEL CESR stream."""
+    import httpx
+
+    aid, cesr = issuer_cesr_stream
+
+    def fake_get(url, *, timeout=None):  # noqa: ARG001
+        req = httpx.Request("GET", url)
+        if url.endswith("/info"):
+            return httpx.Response(200, text='{"version":"0.17.13"}', request=req)
+        if url.endswith(f"/oobi/{aid}"):
+            return httpx.Response(200, content=cesr, request=req)
+        raise AssertionError(f"unexpected GET {url}")
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    settings = Settings(environment="local", watcher_url="http://watcher.test:3235")
+    r = KelResolver(settings)
+    state = r.resolve(aid)
+
+    assert state["aid"] == aid
+    assert state["source"] == "watcher"
+    assert state["watcher_url"] == "http://watcher.test:3235"
+    assert len(state["current_public_keys"]) == 1
+
+
+def test_resolve_via_watcher_raises_when_watcher_lacks_the_aid(monkeypatch):
+    """keriox watcher returns 200 + empty body for unknown AIDs.
+
+    Asserts against ``_resolve_via_watcher`` directly: the outer
+    ``resolve()`` wrapper catches our KelResolutionError and rewraps it
+    as 'watcher unreachable and no usable fallback', which hides the
+    specific reason the watcher-side lookup failed.
+    """
+    import httpx
+
+    def fake_get(url, *, timeout=None):  # noqa: ARG001
+        req = httpx.Request("GET", url)
+        if url.endswith("/info"):
+            return httpx.Response(200, text='{"version":"0.17.13"}', request=req)
+        return httpx.Response(200, content=b"", request=req)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    settings = Settings(environment="local", watcher_url="http://watcher.test:3235")
+    r = KelResolver(settings)
+    with pytest.raises(KelResolutionError, match="empty OOBI response"):
+        r._resolve_via_watcher("EUnknown")

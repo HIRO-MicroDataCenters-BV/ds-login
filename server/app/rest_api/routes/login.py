@@ -40,16 +40,23 @@ def login_challenge(
 ) -> ChallengeResponse:
     """Issue a one-time nonce for the given AID."""
     # Confirm the KEL is resolvable before issuing a challenge; otherwise
-    # the user would sign a nonce we'd then reject at verify time.
+    # the user would sign a nonce we'd then reject at verify time. Prefer
+    # caller-supplied OOBIs (fresh wallets); fall back to the configured
+    # watcher if none supplied.
     try:
-        resolver.resolve(body.aid)
+        if body.oobi_urls:
+            kel = resolver.resolve_from_oobis(body.aid, body.oobi_urls)
+        else:
+            kel = resolver.resolve(body.aid)
     except KelResolutionError as e:
         raise HTTPException(
             status_code=404,
             detail=f"KEL for AID {body.aid} not resolvable: {e}",
         )
 
-    challenge = store.issue(body.aid)
+    # Cache the resolved KEL on the challenge so verify doesn't re-fetch
+    # (same key the user signs against is the key we check with).
+    challenge = store.issue(body.aid, kel=kel)
     return ChallengeResponse(
         aid=body.aid,
         nonce_hex=challenge.nonce.hex(),
@@ -83,11 +90,19 @@ def login_verify(
         )
 
     # 2. KEL lookup — the whole point of KERI is we resolve the public key
-    # from the AID's own committed key state, not from client input
-    try:
-        kel = resolver.resolve(body.aid)
-    except KelResolutionError as e:
-        return VerifyResponse(aid=body.aid, verified=False, reason=f"KEL unavailable: {e}")
+    # from the AID's own committed key state, not from client input.
+    # Prefer the KEL cached on the challenge (resolved + verified at
+    # challenge issue time); fall back to a fresh resolve so verify still
+    # works if the cache was lost (pod restart, different replica).
+    kel = challenge.kel
+    if kel is None:
+        try:
+            if body.oobi_urls:
+                kel = resolver.resolve_from_oobis(body.aid, body.oobi_urls)
+            else:
+                kel = resolver.resolve(body.aid)
+        except KelResolutionError as e:
+            return VerifyResponse(aid=body.aid, verified=False, reason=f"KEL unavailable: {e}")
 
     public_keys = kel.get("current_public_keys") or []
     if not public_keys:

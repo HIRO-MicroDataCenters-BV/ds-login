@@ -112,23 +112,48 @@ class KelResolver:
             f"last error: {last_error}"
         )
 
-    # ─── legacy watcher path (unsigned, Phase 0 compat) ─────────────────
+    # ─── watcher path ──────────────────────────────────────────────────
 
     def _resolve_via_watcher(self, aid: str) -> dict[str, Any]:
-        """Thin probe against a configured watcher's ``/info`` endpoint.
+        """Query the configured watcher for ``aid``'s KEL.
 
-        Kept so the challenge flow can do a quick "is the watcher up"
-        check for the Phase 0 UX. Full-fat watcher-side ``qry`` lives in a
-        separate PR — not required for the open-federation model, which
-        resolves KELs directly from grant OOBIs.
+        keriox watcher exposes ``GET /oobi/<AID>`` returning the CESR
+        stream of the AID's KEL (empty body + 200 if the watcher doesn't
+        know the AID). We parse that stream the same way we parse an
+        inbound issuer OOBI and extract current key / witnesses / sn.
+
+        Pre-check: ``GET /info`` so a bad base URL fails fast with a
+        connection error rather than looking like "AID unknown".
         """
         base = self.settings.watcher_url.rstrip("/")
-        r = httpx.get(f"{base}/info", timeout=3.0)
-        r.raise_for_status()
-        raise KelResolutionError(
-            f"watcher {base} is reachable but direct KEL query not wired yet; "
-            "callers verifying inbound grants should use resolve_from_oobis"
+
+        info = httpx.get(f"{base}/info", timeout=3.0)
+        info.raise_for_status()
+
+        oobi_resp = httpx.get(f"{base}/oobi/{aid}", timeout=5.0)
+        if oobi_resp.status_code != 200:
+            raise KelResolutionError(
+                f"watcher {base} returned HTTP {oobi_resp.status_code} "
+                f"for /oobi/{aid}"
+            )
+        if not oobi_resp.content:
+            raise KelResolutionError(
+                f"watcher {base} does not have a KEL for AID {aid!r} "
+                "(empty OOBI response — caller must present an OOBI URL "
+                "that resolves to the AID's KEL)"
+            )
+
+        state = _kel_state_from_oobi(
+            OobiResult(
+                url=f"{base}/oobi/{aid}",
+                content_type=oobi_resp.headers.get("content-type", "application/cesr"),
+                body=oobi_resp.content,
+            ),
+            aid,
         )
+        state["source"] = "watcher"
+        state["watcher_url"] = base
+        return state
 
     # ─── disk fallback (dev only) ───────────────────────────────────────
 
