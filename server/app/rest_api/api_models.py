@@ -8,6 +8,15 @@ from pydantic import BaseModel, Field
 
 class ChallengeRequest(BaseModel):
     aid: str = Field(..., description="The AID the user is claiming to be")
+    oobi_urls: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional holder OOBI URLs. Passed to the KEL resolver so a "
+            "fresh wallet whose KEL isn't yet in any Hiro-side watcher "
+            "can still be challenged. Omit when the KEL is already "
+            "published to the configured watcher."
+        ),
+    )
 
 
 class ChallengeResponse(BaseModel):
@@ -23,6 +32,14 @@ class VerifyRequest(BaseModel):
     aid: str
     nonce_hex: str
     signature_qb64: str = Field(..., description="CESR-encoded signature (qb64)")
+    oobi_urls: list[str] | None = Field(
+        default=None,
+        description=(
+            "Same meaning as ChallengeRequest.oobi_urls. Repeat here so "
+            "verify works even if the challenge-time cache was lost "
+            "(pod restart, different replica)."
+        ),
+    )
 
     # Phase 1b path — any DKMS-anchored issuer. Verifier resolves the
     # issuer's KEL from the OOBIs inside the grant and verifies the issuer's
