@@ -189,7 +189,13 @@ def test_resolve_via_watcher_parses_oobi_stream(issuer_cesr_stream, monkeypatch)
 
 
 def test_resolve_via_watcher_raises_when_watcher_lacks_the_aid(monkeypatch):
-    """keriox watcher returns 200 + empty body for unknown AIDs."""
+    """keriox watcher returns 200 + empty body for unknown AIDs.
+
+    Asserts against ``_resolve_via_watcher`` directly: the outer
+    ``resolve()`` wrapper catches our KelResolutionError and rewraps it
+    as 'watcher unreachable and no usable fallback', which hides the
+    specific reason the watcher-side lookup failed.
+    """
     import httpx
 
     def fake_get(url, *, timeout=None):  # noqa: ARG001
@@ -203,4 +209,4 @@ def test_resolve_via_watcher_raises_when_watcher_lacks_the_aid(monkeypatch):
     settings = Settings(environment="local", watcher_url="http://watcher.test:3235")
     r = KelResolver(settings)
     with pytest.raises(KelResolutionError, match="empty OOBI response"):
-        r.resolve("EUnknown")
+        r._resolve_via_watcher("EUnknown")
