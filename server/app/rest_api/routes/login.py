@@ -41,10 +41,14 @@ def login_challenge(
     """Issue a one-time nonce for the given AID."""
     # Confirm the KEL is resolvable before issuing a challenge; otherwise
     # the user would sign a nonce we'd then reject at verify time. Prefer
-    # caller-supplied OOBIs (fresh wallets); fall back to the configured
-    # watcher if none supplied.
+    # (in order): inline KEL (Phase 1 facade shortcut) > caller-supplied
+    # OOBIs (fresh wallets with resolvable KEL) > configured watcher.
     try:
-        if body.oobi_urls:
+        if body.holder_kel_cesr:
+            kel = resolver.resolve_from_cesr_stream(
+                body.aid, body.holder_kel_cesr,
+            )
+        elif body.oobi_urls:
             kel = resolver.resolve_from_oobis(body.aid, body.oobi_urls)
         else:
             kel = resolver.resolve(body.aid)
@@ -97,7 +101,11 @@ def login_verify(
     kel = challenge.kel
     if kel is None:
         try:
-            if body.oobi_urls:
+            if body.holder_kel_cesr:
+                kel = resolver.resolve_from_cesr_stream(
+                    body.aid, body.holder_kel_cesr,
+                )
+            elif body.oobi_urls:
                 kel = resolver.resolve_from_oobis(body.aid, body.oobi_urls)
             else:
                 kel = resolver.resolve(body.aid)
