@@ -103,10 +103,20 @@ class AcdcVerifier:
             )
 
         # 3. Resolve issuer KEL ------------------------------------------
+        # Prefer the inline KEL (dkms-bin facade grants carry it directly
+        # in iss_kel_cesr — see ADR 0002). The resolver parses the CESR
+        # stream in-process with KERIpy, keeping ADR 0001's verify path
+        # intact and sidestepping the keriox watcher's limitation of not
+        # serving third-party KELs over plain HTTP.
         try:
-            issuer_kel = self.kel_resolver.resolve_from_oobis(
-                parsed.issuer_aid, parsed.issuer_oobi_urls
-            )
+            if parsed.issuer_kel_cesr:
+                issuer_kel = self.kel_resolver.resolve_from_cesr_stream(
+                    parsed.issuer_aid, parsed.issuer_kel_cesr,
+                )
+            else:
+                issuer_kel = self.kel_resolver.resolve_from_oobis(
+                    parsed.issuer_aid, parsed.issuer_oobi_urls
+                )
         except KelResolutionError as e:
             raise CredentialVerificationError(
                 f"issuer {parsed.issuer_aid!r} KEL unresolvable: {e}"
