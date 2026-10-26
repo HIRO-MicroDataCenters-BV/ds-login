@@ -7,20 +7,28 @@ from app.core.kel_resolver import KelResolver
 
 
 def _credential(subject_aid: str = "EUser123", **attrs):
-    """Minimal ACDC envelope shape."""
-    attributes = {
+    """Minimal ACDC envelope shape.
+
+    KERIpy's SerderACDC writes claims flat under `.a`, alongside the KERI
+    metadata fields `d` (SAID), `i` (subject AID), `dt` (datetime). Not
+    nested under `.a.a`.
+    """
+    a_block = {
+        "d": "EAttrsSAID",
+        "i": subject_aid,
+        "dt": "2026-10-26T00:00:00+00:00",
         "role": "researcher",
         "institute": "hiro",
         "name": "Alice",
         "email": "alice@hiro.test",
     }
-    attributes.update(attrs)
+    a_block.update(attrs)
     return {
         "v": "ACDC10JSON00018a_",
         "d": "ECredSAID123",
         "i": "EIssuerAID456",
         "s": "ESchemaSAID789",
-        "a": {"d": "EAttrsSAID", "i": subject_aid, "a": attributes},
+        "a": a_block,
     }
 
 
