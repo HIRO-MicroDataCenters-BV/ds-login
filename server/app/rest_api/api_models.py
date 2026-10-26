@@ -17,6 +17,16 @@ class ChallengeRequest(BaseModel):
             "published to the configured watcher."
         ),
     )
+    holder_kel_cesr: str | None = Field(
+        default=None,
+        description=(
+            "Inline holder KEL as a CESR stream (icp + receipts). "
+            "Preferred over oobi_urls in the Phase 1 facade: keriox 0.17 "
+            "watchers do not serve third-party KELs over plain HTTP, so "
+            "inline is the only path that reliably works today. See ADR "
+            "0002 in the ds-login repo."
+        ),
+    )
 
 
 class ChallengeResponse(BaseModel):
@@ -38,6 +48,13 @@ class VerifyRequest(BaseModel):
             "Same meaning as ChallengeRequest.oobi_urls. Repeat here so "
             "verify works even if the challenge-time cache was lost "
             "(pod restart, different replica)."
+        ),
+    )
+    holder_kel_cesr: str | None = Field(
+        default=None,
+        description=(
+            "Inline holder KEL (same shape as ChallengeRequest). When "
+            "present, resolution skips OOBI fetch entirely."
         ),
     )
 
