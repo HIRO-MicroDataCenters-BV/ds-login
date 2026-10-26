@@ -144,10 +144,14 @@ class AcdcVerifier:
         # 5. TEL revocation check ---------------------------------------
         revocation_checked = self._check_not_revoked(parsed)
 
-        attributes = parsed.acdc.get("a", {}).get("a") or {}
+        # KERIpy's SerderACDC writes claims flat under `.a`, alongside the
+        # KERI metadata fields `d` (said), `i` (subject AID), `dt` (datetime).
+        # The verifier previously looked for `.a.a` — mirror of a wallet
+        # that nested a payload under `a`, which no real issuer produces.
+        attributes = parsed.acdc.get("a") or {}
         if not isinstance(attributes, dict):
             raise CredentialVerificationError(
-                "credential attribute block (a.a) is not a JSON object"
+                "credential attribute block (`a`) is not a JSON object"
             )
 
         log.info(
@@ -199,11 +203,13 @@ class AcdcVerifier:
                 f"login AID {subject_aid!r}"
             )
 
-        attributes = attributes_block.get("a") or {}
-        if not isinstance(attributes, dict):
+        # Flat KERIpy ACDC — attributes live beside the KERI metadata keys
+        # (`d`, `i`, `dt`) in `.a`, not nested under `.a.a`.
+        if not isinstance(attributes_block, dict):
             raise CredentialVerificationError(
-                "credential attribute block (`a.a`) is not a JSON object"
+                "credential attribute block (`a`) is not a JSON object"
             )
+        attributes = attributes_block
 
         log.warning(
             "bare ACDC accepted without issuer-signature check (Phase 0 "

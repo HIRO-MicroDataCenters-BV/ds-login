@@ -19,12 +19,11 @@ _VALID_GRANT = {
         "a": {
             "d": "EAttrsSAID",
             "i": "ESubjectAID",
-            "a": {
-                "role": "researcher",
-                "institute": "hiro",
-                "name": "Alice",
-                "email": "alice@hiro.test",
-            },
+            "dt": "2026-10-26T00:00:00+00:00",
+            "role": "researcher",
+            "institute": "hiro",
+            "name": "Alice",
+            "email": "alice@hiro.test",
         },
     },
     "iss_sig": "0BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
