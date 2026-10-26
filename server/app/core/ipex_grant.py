@@ -99,9 +99,29 @@ def parse(grant: dict[str, Any]) -> ParsedGrant:
     if not isinstance(attribute_block, dict):
         raise GrantParseError("grant.acdc.a missing or not a JSON object")
 
-    subject_aid = attribute_block.get("i")
+    # Subject binding and user-facing claims can live in one of two
+    # shapes depending on the issuer:
+    #   * HCF (dkms-bin) nests them at acdc.a.a.*  — dkms-bin wraps the
+    #     caller-supplied attribute dict one level deep, so a mint that
+    #     binds `i: subject_aid` as an attribute lands at acdc.a.a.i.
+    #   * KERIpy flat shape puts them at acdc.a.*  — this is what the
+    #     verifier's unit tests use.
+    # We prefer HCF nesting when `a.a` is a JSON object AND it carries
+    # the subject binding; otherwise fall back to the flat shape. Both
+    # paths must agree on the subject or we'd be reading claims from one
+    # shape and the subject from another.
+    inner = attribute_block.get("a")
+    claim_block: dict[str, Any]
+    if isinstance(inner, dict) and isinstance(inner.get("i"), str) and inner.get("i"):
+        claim_block = inner
+    else:
+        claim_block = attribute_block
+
+    subject_aid = claim_block.get("i")
     if not isinstance(subject_aid, str) or not subject_aid:
-        raise GrantParseError("grant.acdc.a.i (subject AID) missing")
+        raise GrantParseError(
+            "grant.acdc.a.i or grant.acdc.a.a.i (subject AID) missing"
+        )
 
     issuer_sig = grant.get("iss_sig")
     if not isinstance(issuer_sig, str) or not issuer_sig:

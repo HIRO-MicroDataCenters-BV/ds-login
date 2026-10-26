@@ -154,15 +154,23 @@ class AcdcVerifier:
         # 5. TEL revocation check ---------------------------------------
         revocation_checked = self._check_not_revoked(parsed)
 
-        # KERIpy's SerderACDC writes claims flat under `.a`, alongside the
-        # KERI metadata fields `d` (said), `i` (subject AID), `dt` (datetime).
-        # The verifier previously looked for `.a.a` — mirror of a wallet
-        # that nested a payload under `a`, which no real issuer produces.
-        attributes = parsed.acdc.get("a") or {}
-        if not isinstance(attributes, dict):
+        # Claims live in one of two shapes depending on the issuer:
+        #   * HCF (dkms-bin) nests them under `acdc.a.a.*` — the caller
+        #     passes an attribute dict and dkms-bin wraps it in `a.a`.
+        #     Subject binding and user-facing claims sit side-by-side.
+        #   * KERIpy flat shape: claims flat at `acdc.a.*` alongside the
+        #     KERI metadata `d`/`i`/`dt`. This is what unit tests use.
+        # The parser already picked the shape — mirror its choice here.
+        outer = parsed.acdc.get("a") or {}
+        if not isinstance(outer, dict):
             raise CredentialVerificationError(
                 "credential attribute block (`a`) is not a JSON object"
             )
+        inner = outer.get("a")
+        if isinstance(inner, dict) and isinstance(inner.get("i"), str) and inner.get("i"):
+            attributes = inner
+        else:
+            attributes = outer
 
         log.info(
             "credential verified: issuer=%s subject=%s said=%s "
@@ -205,21 +213,25 @@ class AcdcVerifier:
         if not issuer_aid:
             raise CredentialVerificationError("credential missing issuer (`i` field)")
 
-        attributes_block = credential.get("a") or {}
-        actual_subject = attributes_block.get("i")
+        outer = credential.get("a") or {}
+        if not isinstance(outer, dict):
+            raise CredentialVerificationError(
+                "credential attribute block (`a`) is not a JSON object"
+            )
+        # Same two-shape handling as the grant path: HCF nests at a.a,
+        # KERIpy fixtures are flat at a.
+        inner = outer.get("a")
+        if isinstance(inner, dict) and isinstance(inner.get("i"), str) and inner.get("i"):
+            attributes = inner
+        else:
+            attributes = outer
+
+        actual_subject = attributes.get("i")
         if actual_subject != subject_aid:
             raise CredentialVerificationError(
                 f"credential subject {actual_subject!r} does not match "
                 f"login AID {subject_aid!r}"
             )
-
-        # Flat KERIpy ACDC — attributes live beside the KERI metadata keys
-        # (`d`, `i`, `dt`) in `.a`, not nested under `.a.a`.
-        if not isinstance(attributes_block, dict):
-            raise CredentialVerificationError(
-                "credential attribute block (`a`) is not a JSON object"
-            )
-        attributes = attributes_block
 
         log.warning(
             "bare ACDC accepted without issuer-signature check (Phase 0 "
