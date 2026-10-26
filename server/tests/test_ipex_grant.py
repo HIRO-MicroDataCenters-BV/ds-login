@@ -96,6 +96,40 @@ def test_rejects_missing_subject_aid():
         parse(g)
 
 
+def test_accepts_hcf_nested_shape_with_subject_at_a_a_i():
+    """dkms-bin wraps caller-supplied attrs as acdc.a.a, so the subject
+    binding we injected lands at acdc.a.a.i. Parser must accept both
+    shapes (HCF-nested preferred, KERIpy flat as fallback)."""
+    g = copy.deepcopy(_VALID_GRANT)
+    g["acdc"]["a"] = {
+        "d": "EAttrsSAID",
+        "a": {
+            "i": "ESubjectAID",
+            "role": "researcher",
+            "institute": "hiro",
+            "name": "Alice",
+            "email": "alice@hiro.test",
+        },
+    }
+    parsed = parse(g)
+    assert parsed.subject_aid == "ESubjectAID"
+    assert parsed.issuer_aid == "EIssuerAID"
+
+
+def test_hcf_shape_rejected_when_subject_missing_from_both_levels():
+    """If a.a is a dict but has no `i`, and a has no `i` either, we
+    cannot bind the subject and must reject the grant."""
+    g = copy.deepcopy(_VALID_GRANT)
+    g["acdc"]["a"] = {
+        "d": "EAttrsSAID",
+        "a": {
+            "role": "researcher",
+        },
+    }
+    with pytest.raises(GrantParseError, match="subject AID"):
+        parse(g)
+
+
 def test_rejects_empty_witness_urls_list_when_no_inline_kel():
     g = _mutate(**{"iss_oobis.witness_urls": []})
     with pytest.raises(GrantParseError, match="non-empty"):

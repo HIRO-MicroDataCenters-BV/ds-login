@@ -84,6 +84,42 @@ def test_rejects_non_dict():
         v.verify("not a credential", subject_aid="EUser123")  # type: ignore[arg-type]
 
 
+def _hcf_nested_credential(subject_aid: str = "EUser123", **attrs):
+    """ACDC in the HCF-nested shape that dkms-bin emits — subject
+    binding and claims under `acdc.a.a`, outer `acdc.a` just carries
+    the attribute-block SAID."""
+    inner = {
+        "i": subject_aid,
+        "role": "researcher",
+        "institute": "hiro",
+        "name": "Alice",
+        "email": "alice@hiro.test",
+    }
+    inner.update(attrs)
+    return {
+        "v": "ACDC10JSON00018a_",
+        "d": "ECredSAID123",
+        "i": "EIssuerAID456",
+        "s": "ESchemaSAID789",
+        "a": {"d": "EAttrsSAID", "a": inner},
+    }
+
+
+def test_legacy_verify_accepts_hcf_nested_shape():
+    v = AcdcVerifier(kel_resolver=_resolver_stub())
+    result = v.verify(_hcf_nested_credential(), subject_aid="EUser123")
+    assert result.subject_aid == "EUser123"
+    assert result.attributes["role"] == "researcher"
+    assert result.attributes["institute"] == "hiro"
+
+
+def test_legacy_verify_rejects_hcf_shape_with_wrong_subject():
+    v = AcdcVerifier(kel_resolver=_resolver_stub())
+    cred = _hcf_nested_credential(subject_aid="ESomeoneElse")
+    with pytest.raises(CredentialVerificationError, match="does not match"):
+        v.verify(cred, subject_aid="EUser123")
+
+
 # ─── Phase 1b: IPEX grant path ─────────────────────────────────────────
 
 
