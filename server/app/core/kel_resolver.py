@@ -71,6 +71,32 @@ class KelResolver:
             f"and no usable fallback"
         )
 
+    def resolve_from_cesr_stream(
+        self,
+        aid: str,
+        cesr_stream: str | bytes,
+    ) -> dict[str, Any]:
+        """Parse an inline CESR stream (icp + receipts) into a KEL state.
+
+        Phase 1 facade (ADR 0002): dkms-bin-issued grants carry the
+        issuer's own KEL as a CESR stream alongside the ACDC, so a
+        verifier can parse it in-process without hitting any watcher
+        or witness. Same KERIpy parse code path as the OOBI route.
+        """
+        body = cesr_stream.encode("utf-8") if isinstance(cesr_stream, str) else bytes(cesr_stream)
+        if not body:
+            raise KelResolutionError(
+                f"inline CESR stream for {aid!r} is empty"
+            )
+        oobi = OobiResult(
+            url=f"inline:cesr/{aid}",
+            content_type="application/cesr",
+            body=body,
+        )
+        state = _kel_state_from_oobi(oobi, aid)
+        state["source"] = "inline-cesr"
+        return state
+
     def resolve_from_oobis(
         self,
         aid: str,

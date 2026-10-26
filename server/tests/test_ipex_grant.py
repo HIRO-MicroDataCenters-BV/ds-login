@@ -96,15 +96,29 @@ def test_rejects_missing_subject_aid():
         parse(g)
 
 
-def test_rejects_empty_witness_urls_list():
+def test_rejects_empty_witness_urls_list_when_no_inline_kel():
     g = _mutate(**{"iss_oobis.witness_urls": []})
-    with pytest.raises(GrantParseError, match="non-empty list"):
+    with pytest.raises(GrantParseError, match="non-empty"):
         parse(g)
 
 
-def test_rejects_non_http_witness_url():
-    g = _mutate(**{"iss_oobis.witness_urls": ["ftp://sketchy.example/oobi"]})
-    with pytest.raises(GrantParseError, match="non-http URL"):
+def test_accepts_inline_kel_without_witness_urls():
+    """Phase 1 facade: grants carrying iss_kel_cesr don't need OOBI URLs."""
+    g = copy.deepcopy(_VALID_GRANT)
+    g["iss_kel_cesr"] = (
+        '{"v":"KERI10JSON000159_","t":"icp","d":"EAAA","i":"EAAA",'
+        '"s":"0","kt":"1","k":["D..."],"nt":"1","n":["E..."],'
+        '"bt":"0","b":[],"c":[],"a":[]}'
+    )
+    g["iss_oobis"]["witness_urls"] = []
+    parsed = parse(g)
+    assert parsed.issuer_kel_cesr.startswith('{"v":"KERI10JSON')
+    assert parsed.issuer_oobi_urls == []
+
+
+def test_non_string_witness_url_rejected():
+    g = _mutate(**{"iss_oobis.witness_urls": [123]})
+    with pytest.raises(GrantParseError, match="not a string"):
         parse(g)
 
 

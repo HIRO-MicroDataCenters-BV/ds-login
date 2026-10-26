@@ -66,6 +66,12 @@ class ParsedGrant:
     registry_said: str | None = None
     tel_witness_urls: list[str] = field(default_factory=list)
     exn: dict[str, Any] | None = None
+    # Facade grants (Phase 1): dkms-bin-issued grants carry the issuer's
+    # own KEL as a CESR stream, so a verifier can parse it in-process
+    # without OOBI resolve (watchers don't serve third-party KELs over
+    # plain HTTP in keriox 0.17). When present, verifiers prefer this
+    # over witness_urls.
+    issuer_kel_cesr: str = ""
 
 
 def parse(grant: dict[str, Any]) -> ParsedGrant:
@@ -101,20 +107,34 @@ def parse(grant: dict[str, Any]) -> ParsedGrant:
     if not isinstance(issuer_sig, str) or not issuer_sig:
         raise GrantParseError("grant.iss_sig (issuer signature) missing")
 
+    # Phase 1 facade shortcut: inline KEL, no OOBI resolution needed.
+    iss_kel_cesr = grant.get("iss_kel_cesr") or ""
+    if iss_kel_cesr and not isinstance(iss_kel_cesr, str):
+        raise GrantParseError("grant.iss_kel_cesr must be a string if present")
+
     oobis = grant.get("iss_oobis")
     if not isinstance(oobis, dict):
         raise GrantParseError("grant.iss_oobis missing or not a JSON object")
 
-    witness_urls = oobis.get("witness_urls")
-    if not isinstance(witness_urls, list) or not witness_urls:
+    # When the grant carries an inline KEL, OOBI URLs become optional
+    # (the verifier won't need to resolve). This is the dkms-bin-issued
+    # shape; we keep the strict validation for legacy grants that still
+    # depend on OOBI resolve.
+    witness_urls = oobis.get("witness_urls") or []
+    if not isinstance(witness_urls, list):
+        raise GrantParseError("grant.iss_oobis.witness_urls must be a list")
+    if not iss_kel_cesr and not witness_urls:
         raise GrantParseError(
-            "grant.iss_oobis.witness_urls must be a non-empty list — the "
-            "verifier needs at least one URL to reach the issuer's witnesses"
+            "grant.iss_oobis.witness_urls must be non-empty when "
+            "grant.iss_kel_cesr is absent — the verifier needs at least "
+            "one way to reach the issuer's KEL"
         )
+    # Only validate URL shape for legacy string-URL entries; dkms-bin
+    # emits stringified JSON objects here (object OOBIs, per the facade).
     for u in witness_urls:
-        if not isinstance(u, str) or not u.startswith(("http://", "https://")):
+        if not isinstance(u, str):
             raise GrantParseError(
-                f"grant.iss_oobis.witness_urls contains non-http URL: {u!r}"
+                f"grant.iss_oobis.witness_urls entry is not a string: {u!r}"
             )
 
     witness_aids = oobis.get("witness_aids") or []
@@ -144,4 +164,5 @@ def parse(grant: dict[str, Any]) -> ParsedGrant:
         registry_said=registry_said,
         tel_witness_urls=list(tel_witness_urls),
         exn=exn,
+        issuer_kel_cesr=iss_kel_cesr,
     )
