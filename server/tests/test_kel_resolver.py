@@ -149,14 +149,35 @@ def test_kel_state_from_oobi_rejects_non_icp_first_event():
     """The resolver reads only the inception; a rotation event as the
     first thing in the stream is a malformed OOBI response."""
     aid = "EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW"
-    rot_only = (
-        b'{"v":"KERI10JSON000080_","t":"rot","d":"EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW",'
-        b'"i":"EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW","s":"1"}'
+    # Build a well-formed rot body (we don't care if it's cryptographically
+    # valid, only that its JSON parses and the version header's size
+    # matches the actual byte count).
+    rot_payload = (
+        b'"t":"rot","d":"EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW",'
+        b'"i":"EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW","s":"1",'
+        b'"kt":"1","k":["DAz6dsiOU4pbfvp0OB7TqnDXPdhlj_r9cjPJKAmw_9Vq"],'
+        b'"nt":"1","n":["EPs1wLvzDz-KpTjNFyv_DUB3HrkAqn3JNY7JY2yvNTCA"],'
+        b'"bt":"1","br":[],"ba":[],"a":[]}'
     )
+    # Header is `{"v":"KERI10JSON<6-hex>_",` → size includes the whole
+    # body including the version string. Pre-compute: header length is 24
+    # chars + 6 for the hex size, then rot_payload.
+    head_prefix = b'{"v":"KERI10JSON'
+    tail_hex_underscore = b'_",'
+    # Try sizes 1..100000 — the correct one is where the serialized
+    # body length equals the declared size.
+    for size in range(len(rot_payload) + len(head_prefix) + len(tail_hex_underscore) + 6,
+                      len(rot_payload) + len(head_prefix) + len(tail_hex_underscore) + 20):
+        body = head_prefix + f"{size:06x}".encode() + tail_hex_underscore + rot_payload
+        if len(body) == size:
+            break
+    else:
+        raise AssertionError("failed to compute self-consistent rot body")
+
     oobi = OobiResult(
         url=f"inline:cesr/{aid}",
         content_type="application/cesr",
-        body=rot_only,
+        body=body,
     )
     with pytest.raises(KelResolutionError, match="'rot'"):
         _kel_state_from_oobi(oobi, aid)
