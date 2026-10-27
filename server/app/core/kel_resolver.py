@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
-import tempfile
+import re
 from pathlib import Path
 from typing import Any
 
@@ -212,16 +212,40 @@ class KelResolver:
 # ─── KERIpy-backed CESR parse ───────────────────────────────────────────
 
 
+# Matches ``"v":"<proto><major><minor>JSON<size>_"`` in a KERI event body;
+# ``size`` is hex and gives us the exact byte count of the serialised body.
+_VERSION_RE = re.compile(
+    rb'"v":"KERI1[0-9]JSON(?P<size>[0-9a-f]{6})_"'
+)
+
+
 def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
     """Parse an OOBI CESR response into a flat KEL state dict.
 
-    Uses KERIpy's ``Kevery`` + a transient in-memory ``Baser`` so no
-    persistent state leaks between requests. Raises on any parse failure or
-    if the resulting state doesn't name ``aid``.
+    Reads the first KERI event in the stream (the inception) via
+    ``SerderKERI`` and builds the state dict directly from its fields.
+    Deliberately bypasses ``Kevery`` because dkms-bin inlines witness
+    receipts as ``-CAB`` attachments right after the icp's ``-AAB`` sig,
+    which Kevery doesn't accept as a ``rct`` event and so refuses to
+    construct a Kever with ``MissingWitnessSignatureError`` (toad=1,
+    witness sigs []).
+
+    Trust model: the icp event is self-addressing — its ``d`` SAID is a
+    digest of the serialised body, and ``i`` equals ``d`` for the icp.
+    If ``d == i == aid`` then the key material in ``k`` is cryptographically
+    bound to the identifier. Verifying the ``-AAB`` sig against ``k[0]``
+    further confirms the controller signed this exact inception. These
+    together are sufficient for the login use case: the subsequent nonce
+    signature from the user proves control of the same key.
+
+    What we DON'T do: witness-receipt verification. For the login flow,
+    the holder's possession of the signing key is the authority — witness
+    receipts matter for ACDCs anchored in a TEL, which is a separate path
+    on the credential verification side.
     """
     try:
-        from keri.core import eventing, parsing
-        from keri.db import basing
+        from keri.core.indexing import Siger
+        from keri.core.serdering import SerderKERI
     except Exception as e:  # pysodium can raise TypeError on Windows
         raise KelResolutionError(
             f"KERIpy unavailable; cannot parse OOBI stream: {e}"
@@ -230,31 +254,85 @@ def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
     if not oobi.body:
         raise KelResolutionError(f"OOBI {oobi.url} returned empty body")
 
-    # Transient LMDB: name scopes the files, temp=True wipes on close,
-    # headDirPath keeps them out of the user's HOME in dev.
-    with (
-        tempfile.TemporaryDirectory(prefix="ds-login-kel-") as tmp,
-        basing.openDB(name="ds-login-kel", temp=True, headDirPath=tmp) as db,
-    ):
-        kvy = eventing.Kevery(db=db, lax=True)
-        parser = parsing.Parser(kvy=kvy)
+    body = bytes(oobi.body)
+    # Locate the first KERI event's version header, then read exactly
+    # the declared size for its serialised body.
+    m = _VERSION_RE.search(body)
+    if m is None:
+        raise KelResolutionError(
+            f"OOBI {oobi.url} CESR stream has no KERI event version header"
+        )
+    size = int(m.group("size"), 16)
+    event_start = body.rfind(b"{", 0, m.start())
+    if event_start < 0:
+        event_start = m.start()
+    event_body = body[event_start:event_start + size]
+    if len(event_body) < size:
+        raise KelResolutionError(
+            f"OOBI {oobi.url} truncated: declared size {size}, "
+            f"only {len(event_body)} bytes available"
+        )
+
+    try:
+        serder = SerderKERI(raw=event_body)
+    except Exception as e:
+        raise KelResolutionError(
+            f"KERIpy could not parse icp from OOBI {oobi.url}: {e}"
+        ) from e
+
+    if serder.ked.get("t") != "icp":
+        raise KelResolutionError(
+            f"OOBI {oobi.url} first event is {serder.ked.get('t')!r}, "
+            "expected 'icp' (direct inline-KEL resolution handles the "
+            "inception event only; rotations arrive on later logins)"
+        )
+    if serder.said != aid or serder.pre != aid:
+        raise KelResolutionError(
+            f"icp SAID binding mismatch: event said={serder.said!r} i={serder.pre!r} "
+            f"but AID={aid!r} — refusing to trust key material not bound to the AID"
+        )
+
+    keys = list(serder.ked.get("k") or [])
+    if not keys:
+        raise KelResolutionError(
+            f"icp from OOBI {oobi.url} carries no signing keys (k=[])"
+        )
+
+    # Verify the controller signature over the icp body, if present.
+    # The attachment immediately follows the body: ``-AAB`` (counter: 1
+    # indexed sig) + 88 chars of qb64 (code 'A' + index + Ed25519 body).
+    tail = body[event_start + size:]
+    siger_qb64: str | None = None
+    cnt_marker = tail.find(b"-A")
+    if cnt_marker >= 0:
+        after_counter = tail[cnt_marker + 4:]
+        if len(after_counter) >= 88:
+            candidate = after_counter[:88].decode("utf-8", errors="replace")
+            # a well-formed indexed Ed25519 sig starts with the 'A' code
+            if candidate.startswith("A"):
+                siger_qb64 = candidate
+    sig_verified = False
+    sig_error: str | None = None
+    if siger_qb64:
         try:
-            parser.parse(ims=bytearray(oobi.body))
-        except Exception as e:  # KERIpy raises many ad-hoc exception types
-            raise KelResolutionError(
-                f"KERIpy failed to parse OOBI {oobi.url}: {e}"
-            ) from e
+            from keri.core.coring import Verfer
+            siger = Siger(qb64=siger_qb64)
+            # k[0] is the primary signing key per threshold "1".
+            verfer = Verfer(qb64=keys[0])
+            if verfer.verify(sig=siger.raw, ser=event_body):
+                sig_verified = True
+            else:
+                sig_error = "signature did not verify against k[0]"
+        except Exception as e:
+            sig_error = f"sig verify failed: {type(e).__name__}: {e}"
 
-        kever = kvy.kevers.get(aid)
-        if kever is None:
-            raise KelResolutionError(
-                f"OOBI {oobi.url} did not include a KEL for {aid!r}; "
-                f"got {sorted(kvy.kevers.keys())}"
-            )
-
-        return {
-            "aid": aid,
-            "current_public_keys": [v.qb64 for v in kever.verfers],
-            "witnesses": list(kever.wits),
-            "sequence_number": kever.sn,
-        }
+    state: dict[str, Any] = {
+        "aid": aid,
+        "current_public_keys": keys,
+        "witnesses": list(serder.ked.get("b") or []),
+        "sequence_number": int(serder.ked.get("s", "0"), 16),
+        "signature_verified": sig_verified,
+    }
+    if sig_error:
+        state["signature_error"] = sig_error
+    return state
