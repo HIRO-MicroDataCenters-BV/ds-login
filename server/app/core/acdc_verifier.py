@@ -297,22 +297,29 @@ def _canonical_acdc_bytes(acdc: dict[str, Any]) -> bytes:
     """Serialize an ACDC body for signature verification.
 
     KERI/ACDC uses a specific canonical form for signing (CESR-wrapped JSON
-    with a version string). The reference implementation is in
-    ``keri.core.coring.Serder``; we go through it so the bytes we hash
-    match what the issuer signed.
+    with a version string). The reference implementation moved from the
+    legacy ``keri.core.coring.Serder`` (removed in current KERIpy) to
+    ``keri.core.serdering.SerderACDC``. We go through it so the bytes we
+    hash match what the issuer signed.
+
+    Verified byte-identical against a dkms-bin v0.8.2 issue+sign cycle:
+    SerderACDC(sad=acdc).raw matches the exact bytes dkms-bin emits in
+    its ACDC body, so an issuer that signs those raw bytes (as
+    ds-credential-issuer PR #25 does) round-trips cleanly here.
     """
     try:
-        from keri.core import coring
+        from keri.core.serdering import SerderACDC
     except Exception as e:  # pysodium can raise TypeError on Windows
         raise CredentialVerificationError(
             f"KERIpy unavailable; cannot canonicalize ACDC for sig verify: {e}"
         ) from e
 
-    # ``Serder(ked=...)`` recomputes the SAID + serialization; passing a
-    # dict already in canonical shape (as emitted by ds-credential-issuer)
-    # yields identical bytes to what the issuer signed.
+    # ``SerderACDC(sad=...)`` runs the ACDC-specific validation and emits
+    # the canonical serialization. The input dict is already in canonical
+    # shape (as emitted by ds-credential-issuer / dkms-bin), so this is a
+    # byte-stable round-trip rather than a re-SAID.
     try:
-        return bytes(coring.Serder(ked=acdc).raw)
+        return bytes(SerderACDC(sad=acdc).raw)
     except Exception as e:  # KERIpy ad-hoc exception taxonomy
         raise CredentialVerificationError(
             f"could not canonicalize ACDC for signature verification: {e}"
