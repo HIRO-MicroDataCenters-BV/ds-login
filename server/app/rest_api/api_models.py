@@ -34,7 +34,14 @@ class ChallengeResponse(BaseModel):
     nonce_hex: str
     expires_at: float
     signing_hint: str = Field(
-        default="Sign these bytes (nonce, decoded from hex) with your AID's current signing key.",
+        default=(
+            'Sign the canonical JSON envelope {"nonce":"<nonce_hex>"} '
+            '(separators=(",",":"), sort_keys=true) with your AID\'s '
+            "current signing key. The server also accepts a signature "
+            "over the raw hex-decoded nonce bytes for KERIpy-native "
+            "clients, but dkms-bin's data-sign only accepts JSON input "
+            "so the envelope is the recommended interop path."
+        ),
     )
 
 

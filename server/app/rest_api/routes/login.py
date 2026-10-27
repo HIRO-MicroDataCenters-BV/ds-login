@@ -117,15 +117,46 @@ def login_verify(
         return VerifyResponse(aid=body.aid, verified=False, reason="KEL has no current signing key")
 
     # 3. Signature verification
-    try:
-        sig_ok = sig_verifier.verify(
-            public_key_qb64=public_keys[0],
-            data=provided_nonce,
-            signature_qb64=body.signature_qb64,
-        )
-    except SignatureVerificationError as e:
-        return VerifyResponse(aid=body.aid, verified=False, reason=str(e))
+    #
+    # Two signing-payload shapes are accepted so the server interoperates
+    # with any KERI client toolkit:
+    #
+    #   a) Raw nonce bytes (``binascii.unhexlify(nonce_hex)``) — what the
+    #      KERIpy ``Signer.sign`` path produces when handed arbitrary bytes.
+    #
+    #   b) Canonical JSON envelope ``{"nonce":"<hex>"}`` serialised with
+    #      ``separators=(",", ":")`` and ``sort_keys=True``. This is what
+    #      dkms-bin's ``data sign`` emits because it only signs JSON; its
+    #      "Invalid input. Only valid JSON can be signed" refusal makes
+    #      the raw-bytes path unusable from the HCF facade.
+    #
+    # We try (a) first (what the original clients produce), then (b).
+    # The client picks whichever one its toolkit supports and the server
+    # accepts either — no out-of-band negotiation needed. The challenge
+    # response's ``signing_hint`` points new clients at (b) because that
+    # path works for both KERIpy and dkms-bin wallets.
+    import json as _json
+    payloads = [
+        provided_nonce,  # raw-bytes shape
+        _json.dumps({"nonce": body.nonce_hex}, separators=(",", ":"),
+                    sort_keys=True).encode("utf-8"),  # canonical JSON envelope
+    ]
+    sig_ok = False
+    sig_err: Exception | None = None
+    for payload in payloads:
+        try:
+            if sig_verifier.verify(
+                public_key_qb64=public_keys[0],
+                data=payload,
+                signature_qb64=body.signature_qb64,
+            ):
+                sig_ok = True
+                break
+        except SignatureVerificationError as e:
+            sig_err = e
 
+    if not sig_ok and sig_err is not None:
+        return VerifyResponse(aid=body.aid, verified=False, reason=str(sig_err))
     if not sig_ok:
         return VerifyResponse(aid=body.aid, verified=False, reason="Ed25519 signature invalid")
 
