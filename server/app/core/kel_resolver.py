@@ -217,6 +217,11 @@ class KelResolver:
 _VERSION_RE = re.compile(
     rb'"v":"KERI1[0-9]JSON(?P<size>[0-9a-f]{6})_"'
 )
+_EVENT_TYPE_RE = re.compile(rb'"t":"(?P<t>\w+)"')
+# Message types that make up a KEL. A witness's OOBI response also carries
+# its own ``rpy`` location reply (identifier = the witness), and streams may
+# carry receipts or queries; none of those are events of the AID's KEL.
+_KEL_EVENT_TYPES = frozenset({b"icp", b"rot", b"ixn", b"dip", b"drt"})
 
 
 def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
@@ -274,7 +279,7 @@ def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
     events = _split_kel_events(body, oobi.url)
     if not events:
         raise KelResolutionError(
-            f"OOBI {oobi.url} CESR stream has no KERI event version header"
+            f"OOBI {oobi.url} CESR stream has no KEL event (icp/rot/ixn)"
         )
 
     # Walk the sequence.
@@ -421,6 +426,12 @@ def _split_kel_events(body: bytes, oobi_url: str) -> list[tuple[bytes, bytes]]:
     bytes that follow until the next event's ``{"v":"KERI`` marker (or
     end-of-stream) are the attachment group — controller sig, witness
     receipts, etc. Returned in document order.
+
+    Only KEL events (icp/rot/ixn/dip/drt) are returned. Other messages and
+    their attachments are dropped: a keriox witness's
+    ``/oobi/<aid>/witness/<eid>`` response ends with the witness's own
+    ``rpy``, which would otherwise fail the per-event checks ("event binds
+    to None") and reject the whole KEL.
     """
     event_offsets: list[tuple[int, int]] = []  # (start, size)
     for m in _VERSION_RE.finditer(body):
@@ -441,6 +452,9 @@ def _split_kel_events(body: bytes, oobi_url: str) -> list[tuple[bytes, bytes]]:
         attach_start = start + size
         attach_end = event_offsets[i + 1][0] if i + 1 < len(event_offsets) else len(body)
         attachment = body[attach_start:attach_end]
+        m = _EVENT_TYPE_RE.search(event_body)
+        if m is None or m.group("t") not in _KEL_EVENT_TYPES:
+            continue
         out.append((event_body, attachment))
     return out
 

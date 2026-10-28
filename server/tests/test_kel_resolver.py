@@ -145,6 +145,66 @@ def test_kel_state_from_oobi_accepts_dkms_bin_inline_receipt_shape():
     assert state["signature_verified"] is True
 
 
+# A keriox 0.17.13 witness's own location reply, as it ends every
+# ``/oobi/<aid>/witness/<eid>`` response (captured from a witness on kind).
+_WITNESS_RPY = (
+    b'{"v":"KERI10JSON000102_","t":"rpy",'
+    b'"d":"ED1zSAsqFC_bc2lxxArqz029tgY_QIzIfxaCh_BM62nW",'
+    b'"dt":"2026-10-27T18:44:02.478456+00:00","r":"/loc/scheme",'
+    b'"a":{"eid":"BNhl_dy2FN4VvQDSIYYFaf_1sDnpWwXjmm3qca5yQCrU","scheme":"http",'
+    b'"url":"http://ds-dkms-witness-1:3232/"}}'
+    b'-CABBNhl_dy2FN4VvQDSIYYFaf_1sDnpWwXjmm3qca5yQCrU0BDB4jvxBWOMiiZsOSs3oHYX3UG4'
+    b'Hjazerel3MlAV3RC9cndric0SOatzl80igwQLfToSi1HZWK4dVkoOZNw0IsK'
+)
+
+
+def test_kel_state_from_oobi_ignores_witness_rpy(issuer_cesr_stream):
+    """A witness OOBI response is the KEL followed by the witness's own
+    ``rpy``. The ``rpy`` is not an event of the AID; it must not reject
+    the KEL ("event binds to None")."""
+    aid, cesr = issuer_cesr_stream
+    oobi = OobiResult(
+        url=f"http://w1.example/oobi/{aid}/witness/BW",
+        content_type="application/cesr",
+        body=cesr + _WITNESS_RPY,
+    )
+    state = _kel_state_from_oobi(oobi, aid)
+    assert state["aid"] == aid
+    assert state["sequence_number"] == 0
+
+
+def test_kel_state_from_oobi_ignores_rpy_between_events():
+    """Non-KEL messages anywhere in the stream are skipped; the sequence
+    check still sees icp (s=0) then rot (s=1)."""
+    from keri.app import habbing
+
+    with habbing.openHby(name="test-rpy-mid", temp=True) as hby:
+        hab = hby.makeHab(name="issuer", transferable=True)
+        icp_bytes = bytes(hab.makeOwnEvent(sn=0))
+        hab.rotate()
+        rot_bytes = bytes(hab.makeOwnEvent(sn=1))
+        new_key = hab.kever.verfers[0].qb64
+
+    oobi = OobiResult(
+        url=f"http://w1.example/oobi/{hab.pre}/witness/BW",
+        content_type="application/cesr",
+        body=icp_bytes + _WITNESS_RPY + rot_bytes + _WITNESS_RPY,
+    )
+    state = _kel_state_from_oobi(oobi, hab.pre)
+    assert state["sequence_number"] == 1
+    assert state["current_public_keys"] == [new_key]
+
+
+def test_kel_state_from_oobi_rejects_stream_with_only_rpy():
+    oobi = OobiResult(
+        url="http://w1.example/oobi/EAid/witness/BW",
+        content_type="application/cesr",
+        body=_WITNESS_RPY,
+    )
+    with pytest.raises(KelResolutionError, match="no KEL event"):
+        _kel_state_from_oobi(oobi, "EAid")
+
+
 def test_kel_state_from_oobi_processes_rotation(issuer_cesr_stream):
     """Rahul audit #2: an old (rotated-out) key must stop working. The
     resolver walks the full KEL and returns the keys FROM THE LAST
