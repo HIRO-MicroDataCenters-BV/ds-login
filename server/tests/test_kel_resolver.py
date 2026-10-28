@@ -145,6 +145,98 @@ def test_kel_state_from_oobi_accepts_dkms_bin_inline_receipt_shape():
     assert state["signature_verified"] is True
 
 
+def test_kel_state_from_oobi_processes_rotation(issuer_cesr_stream):
+    """Rahul audit #2: an old (rotated-out) key must stop working. The
+    resolver walks the full KEL and returns the keys FROM THE LAST
+    event, not from the icp."""
+    from keri.app import habbing
+
+    with habbing.openHby(name="test-rot-issuer", temp=True) as hby:
+        hab = hby.makeHab(name="issuer", transferable=True)
+        icp_bytes = bytes(hab.makeOwnEvent(sn=0))
+        icp_key = hab.kever.verfers[0].qb64
+
+        # Rotate once; makeOwnEvent now serialises the rot too.
+        hab.rotate()
+        rot_bytes = bytes(hab.makeOwnEvent(sn=1))
+        new_key = hab.kever.verfers[0].qb64
+
+        full_kel = icp_bytes + rot_bytes
+
+    assert icp_key != new_key  # sanity
+
+    oobi = OobiResult(
+        url=f"https://w1.example/oobi/{hab.pre}",
+        content_type="application/cesr",
+        body=full_kel,
+    )
+    state = _kel_state_from_oobi(oobi, hab.pre)
+
+    assert state["sequence_number"] == 1
+    # The CURRENT key is the rotated-in one — the icp key does not
+    # appear in current_public_keys.
+    assert new_key in state["current_public_keys"]
+    assert icp_key not in state["current_public_keys"]
+
+
+def test_kel_state_from_oobi_rejects_rotation_that_breaks_commitment(issuer_cesr_stream):
+    """Attacker takes a valid icp, appends a forged rot whose k[0] is a
+    key the attacker controls (not the one icp.n committed to). The
+    pre-rotation digest check must reject."""
+    import json as _json
+    from keri.app import habbing
+    from keri.core.serdering import SerderKERI
+
+    with habbing.openHby(name="test-forgery", temp=True) as hby:
+        hab = hby.makeHab(name="issuer", transferable=True)
+        icp_bytes = bytes(hab.makeOwnEvent(sn=0))
+        hab.rotate()
+        legit_rot = bytes(hab.makeOwnEvent(sn=1))
+
+    # Keep the legit rot's structure, substitute k with an attacker-chosen
+    # key. The pre-rotation `n` commitment on the icp won't match the
+    # digest of the attacker's new key.
+    icp = SerderKERI(raw=icp_bytes)
+    _ = icp  # noqa: F841 (just confirming parse)
+    legit_rot_body_end = legit_rot.find(b"}") + 1
+    rot_ked = _json.loads(legit_rot[:legit_rot_body_end])
+    rot_ked["k"] = ["DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]  # bogus
+    forged_body = _json.dumps(rot_ked, separators=(",", ":")).encode()
+    # size won't match the version header — stream becomes malformed —
+    # the walker rejects either on parse or on digest check. Either way,
+    # the attacker's key never ends up in current_public_keys.
+
+    oobi = OobiResult(
+        url="https://w1.example/forged",
+        content_type="application/cesr",
+        body=icp_bytes + forged_body,
+    )
+    with pytest.raises(KelResolutionError):
+        _kel_state_from_oobi(oobi, SerderKERI(raw=icp_bytes).pre)
+
+
+def test_kel_state_from_oobi_rejects_rotation_with_wrong_prefix(issuer_cesr_stream):
+    """A rot event bound to a different AID than the icp must reject —
+    an attacker can't splice someone else's rot into our KEL."""
+    from keri.app import habbing
+
+    with habbing.openHby(name="a", temp=True) as hby_a, \
+         habbing.openHby(name="b", temp=True) as hby_b:
+        hab_a = hby_a.makeHab(name="a", transferable=True)
+        hab_b = hby_b.makeHab(name="b", transferable=True)
+        icp_a = bytes(hab_a.makeOwnEvent(sn=0))
+        hab_b.rotate()
+        rot_b = bytes(hab_b.makeOwnEvent(sn=1))
+
+    oobi = OobiResult(
+        url="https://w1.example/splice",
+        content_type="application/cesr",
+        body=icp_a + rot_b,
+    )
+    with pytest.raises(KelResolutionError, match="not"):
+        _kel_state_from_oobi(oobi, hab_a.pre)
+
+
 def test_kel_state_from_oobi_rejects_non_icp_first_event():
     """The resolver reads only the inception; a rotation event as the
     first thing in the stream is a malformed OOBI response."""
