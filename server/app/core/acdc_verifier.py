@@ -22,10 +22,10 @@ Verifies a presented IPEX grant end-to-end:
    key as recorded in the KEL we just resolved. This is the step that
    rejects a forged credential and a credential signed with a rotated-away
    key.
-6. **TEL revocation check** — query one of the issuer's witnesses for the
-   current state of the credential's TEL entry (stubbed in Phase 1b; the
-   interface is wired, the keriox TEL endpoint is called out as a Phase 1c
-   follow-up because the exact witness route is still in flux upstream).
+6. **Revocation check** — ask the issuer's revocation list
+   (``GET /credential-status``, see :mod:`.revocation_client`). Fails
+   closed: unknown status means rejected. HCF's TEL can't be read back yet;
+   this replaces the TEL probe until it can.
 
 Phase 1b leaves these for Phase 1c:
 
@@ -41,8 +41,8 @@ from typing import Any
 
 from . import ipex_grant
 from .kel_resolver import KelResolutionError, KelResolver
+from .revocation_client import RevocationCheckError, RevocationClient
 from .signature_verifier import SignatureVerificationError, SignatureVerifier
-from .witness_client import WitnessClient, WitnessUnreachableError
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class VerifiedCredential:
     issuer_aid: str
     attributes: dict[str, Any]
     issuer_pub_key_qb64: str
-    revocation_checked: bool  # Phase 1c flips this to always-True once TEL lands
+    revocation_checked: bool  # True on the grant path; the legacy path never checks
 
 
 class AcdcVerifier:
@@ -76,12 +76,13 @@ class AcdcVerifier:
         self,
         kel_resolver: KelResolver,
         signature_verifier: SignatureVerifier | None = None,
-        witness_client: WitnessClient | None = None,
         trusted_issuer_aids: list[str] | None = None,
+        revocation_client: RevocationClient | None = None,
     ) -> None:
         self.kel_resolver = kel_resolver
         self.sig_verifier = signature_verifier or SignatureVerifier()
-        self.witness = witness_client or WitnessClient()
+        # None → every grant is rejected at the revocation step (fail closed).
+        self.revocation_client = revocation_client
         # Normalise to a set for O(1) lookup. None → empty set →
         # reject-all (fail-safe default when the caller forgot to pass).
         self.trusted_issuer_aids: frozenset[str] = frozenset(trusted_issuer_aids or ())
@@ -174,8 +175,18 @@ class AcdcVerifier:
                 f"{current_keys} ({last_sig_error})"
             )
 
-        # 6. TEL revocation check ---------------------------------------
-        revocation_checked = self._check_not_revoked(parsed)
+        # 6. Revocation check (fail closed) ------------------------------
+        if self.revocation_client is None:
+            raise CredentialVerificationError(
+                "no revocation status source configured; refusing (fail closed)"
+            )
+        try:
+            self.revocation_client.ensure_not_revoked(
+                parsed.issuer_aid, parsed.credential_said
+            )
+        except RevocationCheckError as e:
+            raise CredentialVerificationError(str(e)) from e
+        revocation_checked = True
 
         # Claims live in one of two shapes depending on the issuer:
         #   * HCF (dkms-bin) nests them under `acdc.a.a.*` — the caller
@@ -270,50 +281,6 @@ class AcdcVerifier:
             issuer_pub_key_qb64="",
             revocation_checked=False,
         )
-
-    # ─── TEL check (stub for Phase 1b; interface wired) ─────────────────
-
-    def _check_not_revoked(self, parsed: ipex_grant.ParsedGrant) -> bool:
-        """Query the issuer's TEL state for this credential SAID.
-
-        **Phase 1b scope:** if the grant carries registry metadata and a
-        witness URL, we probe it and log the raw response. We do NOT yet
-        parse the TEL event stream to decide iss/rev — that's Phase 1c once
-        the keriox 0.18 TEL route is pinned down.
-
-        Returns True iff a TEL query was successfully made (not whether the
-        credential is actually revoked). Phase 1c returns True iff the TEL
-        is actually in state ``issued``.
-        """
-        if not parsed.registry_said or not parsed.tel_witness_urls:
-            log.info(
-                "grant did not include registry_said / tel_witness_urls; "
-                "skipping TEL check (Phase 1b)"
-            )
-            return False
-
-        for witness_url in parsed.tel_witness_urls:
-            try:
-                tel = self.witness.fetch_tel_event(
-                    witness_url=witness_url,
-                    registry_said=parsed.registry_said,
-                    credential_said=parsed.credential_said,
-                )
-            except WitnessUnreachableError as e:
-                log.warning("TEL witness %s unreachable: %s", witness_url, e)
-                continue
-
-            # Phase 1c: parse `tel.body` with KERIpy's VDR verifier and
-            # decide iss/rev. For now the mere fact that the witness
-            # responded with ANY body for this SAID is a sanity signal.
-            if tel.body:
-                log.info(
-                    "TEL query ok (bytes=%d) — full state parsing deferred "
-                    "to Phase 1c", len(tel.body),
-                )
-                return True
-
-        return False
 
 
 def _canonical_acdc_bytes(acdc: dict[str, Any]) -> bytes:

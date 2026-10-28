@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .core.acdc_verifier import AcdcVerifier
+from .core.revocation_client import RevocationClient
 from .core.challenge_store import ChallengeStore
 from .core.jwt_signer import JwtSigner
 from .core.kel_resolver import KelResolver
@@ -36,7 +37,19 @@ async def lifespan(app: FastAPI):
     app.state.acdc_verifier = AcdcVerifier(
         kel_resolver=app.state.kel_resolver,
         trusted_issuer_aids=settings.trusted_issuer_aids,
+        revocation_client=RevocationClient(settings.issuer_status_urls),
     )
+    missing_status = [a for a in settings.trusted_issuer_aids
+                      if a not in settings.issuer_status_urls]
+    if missing_status:
+        if settings.environment == "production":
+            raise RuntimeError(
+                "DS__ISSUER_STATUS_URLS has no entry for trusted issuer(s) "
+                f"{missing_status}. Every credential from them would be "
+                "rejected (revocation check fails closed)."
+            )
+        log.warning("no revocation status URL for trusted issuer(s) %s — "
+                    "their credentials will be rejected", missing_status)
     if not settings.trusted_issuer_aids:
         if settings.environment == "production":
             raise RuntimeError(

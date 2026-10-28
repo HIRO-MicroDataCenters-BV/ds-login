@@ -108,6 +108,17 @@ class Settings(BaseSettings):
     )
 
 
+    # Where to ask each trusted issuer whether a credential was revoked:
+    # issuer AID -> issuer base URL (GET {url}/credential-status?said=…).
+    # Fail closed: a grant from an issuer without an entry is rejected.
+    issuer_status_urls: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Issuer AID -> base URL of its revocation status endpoint. Set "
+            "via DS__ISSUER_STATUS_URLS as a JSON object."
+        ),
+    )
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     # mypy can't see that pydantic BaseSettings pulls every field's
