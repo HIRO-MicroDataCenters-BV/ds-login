@@ -110,4 +110,9 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    # mypy can't see that pydantic BaseSettings pulls every field's
+    # default from Field(default=…) / Field(default_factory=…) at
+    # construction time — it reads each required-type annotation as if
+    # the constructor demanded an explicit kwarg. The call itself is
+    # the standard pydantic-settings idiom.
+    return Settings()  # type: ignore[call-arg]

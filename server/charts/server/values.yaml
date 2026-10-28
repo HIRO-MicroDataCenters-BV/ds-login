@@ -48,6 +48,14 @@ jwt:
 environment: "production"   # local / dev / staging / production
 logLevel: "INFO"
 
+# AIDs this verifier will accept IPEX grants FROM. The chart emits this
+# as DS__TRUSTED_ISSUER_AIDS (JSON). Empty = reject-all (fail-safe); the
+# server refuses to start in environment=production when empty. Set to
+# the trusted ds-credential-issuer AID per deployment (visible in the
+# issuer's startup log: 'issuer identifier ready: alias=... aid=...').
+# Rahul audit #1.
+trustedIssuerAids: []
+
 resources:
   limits:
     cpu: 500m

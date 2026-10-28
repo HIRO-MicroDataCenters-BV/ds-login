@@ -46,6 +46,12 @@ spec:
             - name: DS__JWT_PRIVATE_KEY_PEM_PATH
               value: "/etc/ds-login/signing-key/{{ .Values.jwt.signingKeySecretField }}"
             {{- end }}
+            # Credential trust allowlist — empty = reject-all. The
+            # verifier refuses to start in environment=production when
+            # this is empty; see acdc_verifier.verify_grant for the
+            # per-request rejection semantics. Rahul audit #1.
+            - name: DS__TRUSTED_ISSUER_AIDS
+              value: {{ .Values.trustedIssuerAids | toJson | quote }}
           {{- if .Values.jwt.signingKeySecretName }}
           volumeMounts:
             - name: signing-key
