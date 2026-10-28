@@ -145,6 +145,57 @@ def test_kel_state_from_oobi_accepts_dkms_bin_inline_receipt_shape():
     assert state["signature_verified"] is True
 
 
+def test_kel_state_from_oobi_rejects_icp_without_sig_attachment():
+    """An unsigned icp means nothing attests to the keys being under the
+    control of whoever is claiming them. Reject even if the SAID is
+    self-consistent — the point of this check is key *possession*, not
+    just key *binding*. Rahul audit #5."""
+    aid = "EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW"
+    # Same icp body as the previous test, but with NO attachments.
+    icp_only = (
+        b'{"v":"KERI10JSON000159_","t":"icp",'
+        b'"d":"EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW",'
+        b'"i":"EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW","s":"0",'
+        b'"kt":"1","k":["DAz6dsiOU4pbfvp0OB7TqnDXPdhlj_r9cjPJKAmw_9Vq"],'
+        b'"nt":"1","n":["EPs1wLvzDz-KpTjNFyv_DUB3HrkAqn3JNY7JY2yvNTCA"],'
+        b'"bt":"1","b":["BJq7UABlttINuWJh1Xl2lkqZG4NTdUdqnbFJDa6ZyxCC"],'
+        b'"c":[],"a":[]}'
+    )
+    oobi = OobiResult(
+        url=f"inline:cesr/{aid}",
+        content_type="application/cesr",
+        body=icp_only,
+    )
+    with pytest.raises(KelResolutionError, match="no controller signature"):
+        _kel_state_from_oobi(oobi, aid)
+
+
+def test_kel_state_from_oobi_rejects_icp_with_wrong_sig():
+    """Attacker rewrites the sig body (keeps the counter prefix). The sig
+    is well-formed CESR but doesn't verify against k[0]. Rejected."""
+    aid = "EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW"
+    tampered = (
+        b'{"v":"KERI10JSON000159_","t":"icp",'
+        b'"d":"EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW",'
+        b'"i":"EN8anzGOndcAGirqHkhYQvbt5-6s4ITjd62uqnDbg0VW","s":"0",'
+        b'"kt":"1","k":["DAz6dsiOU4pbfvp0OB7TqnDXPdhlj_r9cjPJKAmw_9Vq"],'
+        b'"nt":"1","n":["EPs1wLvzDz-KpTjNFyv_DUB3HrkAqn3JNY7JY2yvNTCA"],'
+        b'"bt":"1","b":["BJq7UABlttINuWJh1Xl2lkqZG4NTdUdqnbFJDa6ZyxCC"],'
+        b'"c":[],"a":[]}'
+        # Counter + sig code are structurally fine so parse succeeds, but
+        # the sig body is all 'A' — doesn't match any real Ed25519 sig
+        # over this body.
+        + b'-AAB' + b'A' * 88
+    )
+    oobi = OobiResult(
+        url=f"inline:cesr/{aid}",
+        content_type="application/cesr",
+        body=tampered,
+    )
+    with pytest.raises(KelResolutionError, match="does not verify against k"):
+        _kel_state_from_oobi(oobi, aid)
+
+
 def test_kel_state_from_oobi_rejects_non_icp_first_event():
     """The resolver reads only the inception; a rotation event as the
     first thing in the stream is a malformed OOBI response."""

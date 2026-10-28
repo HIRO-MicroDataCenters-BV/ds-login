@@ -298,9 +298,18 @@ def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
             f"icp from OOBI {oobi.url} carries no signing keys (k=[])"
         )
 
-    # Verify the controller signature over the icp body, if present.
-    # The attachment immediately follows the body: ``-AAB`` (counter: 1
-    # indexed sig) + 88 chars of qb64 (code 'A' + index + Ed25519 body).
+    # Verify the controller signature over the icp body — MANDATORY.
+    #
+    # The attachment immediately follows the body: ``-AAB`` (counter:
+    # 1 indexed sig) + 88 chars of qb64 (code 'A' + index + Ed25519
+    # body). An icp with no attached controller sig is suspicious: the
+    # SAID binds the keys to the AID but nothing confirms the controller
+    # actually produced this event. Reject.
+    #
+    # Rahul audit #5 — the previous version put signature_verified in
+    # the state dict and left it for callers to check. No caller did,
+    # so the check was effectively absent. Enforced here is the single
+    # choke-point every KEL-resolve route goes through.
     tail = body[event_start + size:]
     siger_qb64: str | None = None
     cnt_marker = tail.find(b"-A")
@@ -311,28 +320,32 @@ def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
             # a well-formed indexed Ed25519 sig starts with the 'A' code
             if candidate.startswith("A"):
                 siger_qb64 = candidate
-    sig_verified = False
-    sig_error: str | None = None
-    if siger_qb64:
-        try:
-            from keri.core.coring import Verfer
-            siger = Siger(qb64=siger_qb64)
-            # k[0] is the primary signing key per threshold "1".
-            verfer = Verfer(qb64=keys[0])
-            if verfer.verify(sig=siger.raw, ser=event_body):
-                sig_verified = True
-            else:
-                sig_error = "signature did not verify against k[0]"
-        except Exception as e:
-            sig_error = f"sig verify failed: {type(e).__name__}: {e}"
+    if siger_qb64 is None:
+        raise KelResolutionError(
+            f"icp from OOBI {oobi.url} has no controller signature "
+            "attachment (-AAB…) — refusing to trust an unsigned "
+            "inception event"
+        )
+    try:
+        from keri.core.coring import Verfer
+        siger = Siger(qb64=siger_qb64)
+        verfer = Verfer(qb64=keys[0])
+    except Exception as e:
+        raise KelResolutionError(
+            f"icp from OOBI {oobi.url} sig attachment malformed: "
+            f"{type(e).__name__}: {e}"
+        ) from e
+    if not verfer.verify(sig=siger.raw, ser=event_body):
+        raise KelResolutionError(
+            f"icp from OOBI {oobi.url} controller signature does not "
+            f"verify against k[0]={keys[0]!r} — refusing to trust key "
+            "material whose owner cannot prove possession"
+        )
 
-    state: dict[str, Any] = {
+    return {
         "aid": aid,
         "current_public_keys": keys,
         "witnesses": list(serder.ked.get("b") or []),
         "sequence_number": int(serder.ked.get("s", "0"), 16),
-        "signature_verified": sig_verified,
+        "signature_verified": True,
     }
-    if sig_error:
-        state["signature_error"] = sig_error
-    return state
