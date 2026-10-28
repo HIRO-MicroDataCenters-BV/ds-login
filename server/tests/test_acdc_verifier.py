@@ -250,3 +250,47 @@ def test_trusted_issuer_set_passes_the_gate():
         v.verify_grant(_grant(), subject_aid="EUser123")
     # Gate passed, resolver WAS called.
     resolver.resolve_trusted.assert_called_once()
+
+
+# ─── Revocation step (fail closed) ─────────────────────────────────────
+
+
+@pytest.fixture(autouse=False)
+def _no_keripy(monkeypatch):
+    # ACDC canonicalisation needs KERIpy + libsodium; these tests are about
+    # the revocation step only.
+    monkeypatch.setattr("app.core.acdc_verifier._canonical_acdc_bytes", lambda acdc: b"acdc")
+
+
+def _verifier_reaching_revocation(revocation_client):
+    """A verifier whose grant passes steps 1–5 (KEL and signature mocked)."""
+    resolver = MagicMock(spec=KelResolver)
+    resolver.resolve_trusted.return_value = {
+        "aid": "EIssuerAID456", "current_public_keys": ["DKey"],
+        "witnesses": [], "sequence_number": 0, "source": "witness",
+    }
+    sig = MagicMock()
+    sig.verify.return_value = True
+    return AcdcVerifier(kel_resolver=resolver, signature_verifier=sig,
+                        trusted_issuer_aids=_TRUSTED, revocation_client=revocation_client)
+
+
+def test_grant_accepted_when_not_revoked(_no_keripy):
+    rc = MagicMock()
+    result = _verifier_reaching_revocation(rc).verify_grant(_grant(), subject_aid="EUser123")
+    rc.ensure_not_revoked.assert_called_once_with("EIssuerAID456", result.said)
+    assert result.revocation_checked is True
+
+
+def test_grant_rejected_when_revoked(_no_keripy):
+    from app.core.revocation_client import RevocationCheckError
+
+    rc = MagicMock()
+    rc.ensure_not_revoked.side_effect = RevocationCheckError("credential X is revoked")
+    with pytest.raises(CredentialVerificationError, match="is revoked"):
+        _verifier_reaching_revocation(rc).verify_grant(_grant(), subject_aid="EUser123")
+
+
+def test_grant_rejected_without_revocation_source(_no_keripy):
+    with pytest.raises(CredentialVerificationError, match="fail closed"):
+        _verifier_reaching_revocation(None).verify_grant(_grant(), subject_aid="EUser123")

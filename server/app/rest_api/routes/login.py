@@ -176,8 +176,19 @@ def login_verify(
         email = verified_cred.attributes.get("email")
         credential_said = verified_cred.said
     elif body.credential is not None:
-        # Legacy path — bare ACDC, subject binding only. Logs a warning;
-        # production should reject this once all wallets emit grants.
+        # Legacy path — bare ACDC, subject binding only: no issuer
+        # signature, no trusted-issuer check, no revocation check. A
+        # self-made `role: admin` ACDC got a JWT this way, so it is
+        # refused in production; send `credential_grant` instead.
+        if settings.environment == "production":
+            return VerifyResponse(
+                aid=body.aid,
+                verified=False,
+                reason=(
+                    "credential rejected: bare `credential` is not accepted in "
+                    "production; present a `credential_grant`"
+                ),
+            )
         try:
             verified_cred = cred_verifier.verify(body.credential, subject_aid=body.aid)
         except CredentialVerificationError as e:

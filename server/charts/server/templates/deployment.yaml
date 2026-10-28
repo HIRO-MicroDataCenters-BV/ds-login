@@ -52,6 +52,9 @@ spec:
             # per-request rejection semantics. Rahul audit #1.
             - name: DS__TRUSTED_ISSUER_AIDS
               value: {{ .Values.trustedIssuerAids | toJson | quote }}
+            # Revocation status per trusted issuer (fail closed).
+            - name: DS__ISSUER_STATUS_URLS
+              value: {{ .Values.issuerStatusUrls | toJson | quote }}
           {{- if .Values.jwt.signingKeySecretName }}
           volumeMounts:
             - name: signing-key

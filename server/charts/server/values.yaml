@@ -56,6 +56,17 @@ logLevel: "INFO"
 # Rahul audit #1.
 trustedIssuerAids: []
 
+# Where ds-login asks each trusted issuer whether a credential was revoked:
+# issuer AID -> issuer base URL (GET <url>/credential-status?said=...).
+# Emitted as DS__ISSUER_STATUS_URLS (JSON). Revocation is checked on every
+# credential login and fails closed: a trusted issuer without an entry here
+# (or an unreachable one) means its credentials are rejected; in
+# environment=production the server refuses to start if an entry is missing.
+# Example:
+#   issuerStatusUrls:
+#     EAjRk4pg98-KSwb9_NjBepdIL4Xx3bznhmQDBGCRLU4G: http://ds-credential-issuer:8080
+issuerStatusUrls: {}
+
 resources:
   limits:
     cpu: 500m
