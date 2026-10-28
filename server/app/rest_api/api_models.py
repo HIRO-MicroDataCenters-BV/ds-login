@@ -78,18 +78,6 @@ class VerifyRequest(BaseModel):
         ),
     )
 
-    # Phase 0 / backward-compat path — bare ACDC with no OOBIs. The server
-    # does subject binding only and logs a warning; the full chain cannot
-    # be verified. Reject this in production once all wallets emit grants.
-    credential: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Deprecated. Bare ACDC envelope used by Phase 0 wallets. Subject "
-            "binding only — issuer signature NOT verified. Prefer "
-            "credential_grant."
-        ),
-    )
-
 
 class VerifyResponse(BaseModel):
     aid: str

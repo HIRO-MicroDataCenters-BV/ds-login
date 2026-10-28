@@ -60,7 +60,7 @@ class VerifiedCredential:
     issuer_aid: str
     attributes: dict[str, Any]
     issuer_pub_key_qb64: str
-    revocation_checked: bool  # True on the grant path; the legacy path never checks
+    revocation_checked: bool  # always True: verify_grant fails closed otherwise
 
 
 class AcdcVerifier:
@@ -220,66 +220,6 @@ class AcdcVerifier:
             attributes=attributes,
             issuer_pub_key_qb64=issuer_pub_key,
             revocation_checked=revocation_checked,
-        )
-
-    # ─── Legacy path (bare ACDC, no sig check — Phase 0 wallets) ────────
-
-    def verify(
-        self,
-        credential: dict[str, Any],
-        subject_aid: str,
-    ) -> VerifiedCredential:
-        """Backward-compat path: parse a bare ACDC, do subject binding only.
-
-        Kept so Phase 0 wallets that don't produce IPEX grants yet continue
-        to work during the migration. Does **not** verify the issuer's
-        signature — that only becomes possible with the OOBIs embedded in a
-        grant. Logs a prominent warning.
-        """
-        if not isinstance(credential, dict):
-            raise CredentialVerificationError("credential must be a JSON object")
-
-        said = credential.get("d")
-        if not said:
-            raise CredentialVerificationError("credential missing SAID (`d` field)")
-
-        issuer_aid = credential.get("i")
-        if not issuer_aid:
-            raise CredentialVerificationError("credential missing issuer (`i` field)")
-
-        outer = credential.get("a") or {}
-        if not isinstance(outer, dict):
-            raise CredentialVerificationError(
-                "credential attribute block (`a`) is not a JSON object"
-            )
-        # Same two-shape handling as the grant path: HCF nests at a.a,
-        # KERIpy fixtures are flat at a.
-        inner = outer.get("a")
-        if isinstance(inner, dict) and isinstance(inner.get("i"), str) and inner.get("i"):
-            attributes = inner
-        else:
-            attributes = outer
-
-        actual_subject = attributes.get("i")
-        if actual_subject != subject_aid:
-            raise CredentialVerificationError(
-                f"credential subject {actual_subject!r} does not match "
-                f"login AID {subject_aid!r}"
-            )
-
-        log.warning(
-            "bare ACDC accepted without issuer-signature check (Phase 0 "
-            "compat); upgrade wallet to send IPEX grant for issuer=%s",
-            issuer_aid,
-        )
-
-        return VerifiedCredential(
-            said=said,
-            subject_aid=subject_aid,
-            issuer_aid=issuer_aid,
-            attributes=attributes,
-            issuer_pub_key_qb64="",
-            revocation_checked=False,
         )
 
 

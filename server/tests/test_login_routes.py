@@ -69,7 +69,6 @@ def _record_verifier():
 def _acdc_stub():
     v = MagicMock(spec=AcdcVerifier)
     v.verify_grant.side_effect = RuntimeError("should not be called in these tests")
-    v.verify.side_effect = RuntimeError("should not be called in these tests")
     return v
 
 
@@ -165,44 +164,31 @@ def test_verify_rejects_signature_over_neither_payload_shape():
     assert "Ed25519 signature invalid" in body["reason"]
 
 
-# ─── legacy bare-credential path ───────────────────────────────────────
+# ─── legacy bare-credential path (removed) ─────────────────────────────
 
 
-def _post_bare_credential(environment):
+def test_bare_credential_field_gives_no_jwt():
+    """The `credential` field (bare ACDC, no issuer signature) is gone. A
+    self-made `role: admin` ACDC got a JWT through it on kind (production
+    mode, 28 Oct 2026). Sending it now is ignored like any unknown field, so
+    the login has no credential and is refused."""
     from app.rest_api.depends import settings_dep
     from app.settings import Settings
 
     settings = Settings()
-    settings.environment = environment
+    settings.environment = "production"
     sv = _record_verifier()
-    acdc = MagicMock(spec=AcdcVerifier)
-    acdc.verify.return_value = MagicMock(
-        said="EFake", attributes={"role": "admin", "institute": "x", "name": "M", "email": "m@x"}
-    )
     with _make_client(sv) as client:
         app.dependency_overrides[settings_dep] = lambda: settings
-        app.dependency_overrides[acdc_verifier_dep] = lambda: acdc
         nonce_hex = _issue_challenge_and_get_nonce(client)
         sv.accept_payload = binascii.unhexlify(nonce_hex)  # type: ignore[attr-defined]
         r = client.post("/login/verify", json={
             "aid": _AID, "nonce_hex": nonce_hex, "signature_qb64": "0B" + "A" * 86,
             "holder_kel_cesr": _HOLDER_KEL_CESR,
-            "credential": {"d": "EFake", "i": "EUntrusted", "a": {"i": _AID, "role": "admin"}},
+            "credential": {"d": "EFake", "i": "EUntrusted",
+                           "a": {"i": _AID, "role": "admin", "institute": "x",
+                                 "name": "M", "email": "m@x"}},
         })
-    return r.json(), acdc
-
-
-def test_bare_credential_refused_in_production():
-    """A self-made `role: admin` ACDC got a JWT through this path on kind
-    (production mode, 28 Oct 2026): no issuer signature, no trust gate."""
-    body, acdc = _post_bare_credential("production")
+    body = r.json()
     assert body["verified"] is False
-    assert "not accepted in production" in body["reason"]
-    assert "jwt" not in body or not body["jwt"]
-    acdc.verify.assert_not_called()
-
-
-def test_bare_credential_still_allowed_outside_production():
-    body, acdc = _post_bare_credential("local")
-    acdc.verify.assert_called_once()
-    assert body["verified"] is True
+    assert not body.get("jwt")

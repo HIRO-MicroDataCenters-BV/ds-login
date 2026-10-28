@@ -38,52 +38,6 @@ def _resolver_stub():
     return MagicMock(spec=KelResolver)
 
 
-# ─── Legacy bare-ACDC path ─────────────────────────────────────────────
-
-
-def test_valid_credential_extracts_attributes():
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
-    result = v.verify(_credential(), subject_aid="EUser123")
-    assert result.said == "ECredSAID123"
-    assert result.subject_aid == "EUser123"
-    assert result.issuer_aid == "EIssuerAID456"
-    assert result.attributes["role"] == "researcher"
-    assert result.attributes["institute"] == "hiro"
-    # Legacy path doesn't verify issuer sig — pub key stays empty, revocation
-    # not checked. Callers that need the full chain must send a grant.
-    assert result.issuer_pub_key_qb64 == ""
-    assert result.revocation_checked is False
-
-
-def test_rejects_credential_for_wrong_subject():
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
-    cred = _credential(subject_aid="ESomeoneElse")
-    with pytest.raises(CredentialVerificationError, match="does not match"):
-        v.verify(cred, subject_aid="EUser123")
-
-
-def test_rejects_missing_said():
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
-    cred = _credential()
-    del cred["d"]
-    with pytest.raises(CredentialVerificationError, match="SAID"):
-        v.verify(cred, subject_aid="EUser123")
-
-
-def test_rejects_missing_issuer():
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
-    cred = _credential()
-    del cred["i"]
-    with pytest.raises(CredentialVerificationError, match="issuer"):
-        v.verify(cred, subject_aid="EUser123")
-
-
-def test_rejects_non_dict():
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
-    with pytest.raises(CredentialVerificationError):
-        v.verify("not a credential", subject_aid="EUser123")  # type: ignore[arg-type]
-
-
 def _hcf_nested_credential(subject_aid: str = "EUser123", **attrs):
     """ACDC in the HCF-nested shape that dkms-bin emits — subject
     binding and claims under `acdc.a.a`, outer `acdc.a` just carries
@@ -103,21 +57,6 @@ def _hcf_nested_credential(subject_aid: str = "EUser123", **attrs):
         "s": "ESchemaSAID789",
         "a": {"d": "EAttrsSAID", "a": inner},
     }
-
-
-def test_legacy_verify_accepts_hcf_nested_shape():
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
-    result = v.verify(_hcf_nested_credential(), subject_aid="EUser123")
-    assert result.subject_aid == "EUser123"
-    assert result.attributes["role"] == "researcher"
-    assert result.attributes["institute"] == "hiro"
-
-
-def test_legacy_verify_rejects_hcf_shape_with_wrong_subject():
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
-    cred = _hcf_nested_credential(subject_aid="ESomeoneElse")
-    with pytest.raises(CredentialVerificationError, match="does not match"):
-        v.verify(cred, subject_aid="EUser123")
 
 
 # ─── Phase 1b: IPEX grant path ─────────────────────────────────────────
@@ -294,3 +233,12 @@ def test_grant_rejected_when_revoked(_no_keripy):
 def test_grant_rejected_without_revocation_source(_no_keripy):
     with pytest.raises(CredentialVerificationError, match="fail closed"):
         _verifier_reaching_revocation(None).verify_grant(_grant(), subject_aid="EUser123")
+
+
+def test_grant_with_hcf_nested_claims_extracts_inner_attributes(_no_keripy):
+    """dkms-bin nests claims at `acdc.a.a`; the verifier reads them there."""
+    grant = _grant()
+    grant["acdc"] = _hcf_nested_credential()
+    result = _verifier_reaching_revocation(MagicMock()).verify_grant(grant, subject_aid="EUser123")
+    assert result.attributes["role"] == "researcher"
+    assert result.attributes["i"] == "EUser123"
