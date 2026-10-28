@@ -42,7 +42,7 @@ _HOLDER_KEL_CESR = (
 
 def _resolver_stub():
     r = MagicMock(spec=KelResolver)
-    r.resolve_from_cesr_stream.return_value = {
+    r.resolve_trusted.return_value = {
         "aid": _AID,
         "current_public_keys": [_PUBKEY],
         "witnesses": ["BJq7UABlttINuWJh1Xl2lkqZG4NTdUdqnbFJDa6ZyxCC"],

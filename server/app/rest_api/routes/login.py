@@ -40,18 +40,14 @@ def login_challenge(
 ) -> ChallengeResponse:
     """Issue a one-time nonce for the given AID."""
     # Confirm the KEL is resolvable before issuing a challenge; otherwise
-    # the user would sign a nonce we'd then reject at verify time. Prefer
-    # (in order): inline KEL (Phase 1 facade shortcut) > caller-supplied
-    # OOBIs (fresh wallets with resolvable KEL) > configured watcher.
+    # the user would sign a nonce we'd then reject at verify time. The KEL
+    # comes from our trusted witnesses, so a stale KEL sent by the client
+    # (from before a rotation) can't revive a rotated-out key; the client's
+    # copy is only a fallback outside production.
     try:
-        if body.holder_kel_cesr:
-            kel = resolver.resolve_from_cesr_stream(
-                body.aid, body.holder_kel_cesr,
-            )
-        elif body.oobi_urls:
-            kel = resolver.resolve_from_oobis(body.aid, body.oobi_urls)
-        else:
-            kel = resolver.resolve(body.aid)
+        kel = resolver.resolve_trusted(
+            body.aid, inline_kel=body.holder_kel_cesr, oobi_urls=body.oobi_urls,
+        )
     except KelResolutionError as e:
         raise HTTPException(
             status_code=404,
@@ -101,14 +97,9 @@ def login_verify(
     kel = challenge.kel
     if kel is None:
         try:
-            if body.holder_kel_cesr:
-                kel = resolver.resolve_from_cesr_stream(
-                    body.aid, body.holder_kel_cesr,
-                )
-            elif body.oobi_urls:
-                kel = resolver.resolve_from_oobis(body.aid, body.oobi_urls)
-            else:
-                kel = resolver.resolve(body.aid)
+            kel = resolver.resolve_trusted(
+                body.aid, inline_kel=body.holder_kel_cesr, oobi_urls=body.oobi_urls,
+            )
         except KelResolutionError as e:
             return VerifyResponse(aid=body.aid, verified=False, reason=f"KEL unavailable: {e}")
 

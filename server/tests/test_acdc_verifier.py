@@ -170,7 +170,7 @@ def test_grant_rejected_when_kel_unresolvable():
     from app.core.kel_resolver import KelResolutionError
 
     resolver = MagicMock(spec=KelResolver)
-    resolver.resolve_from_oobis.side_effect = KelResolutionError(
+    resolver.resolve_trusted.side_effect = KelResolutionError(
         "all 1 OOBI URL(s) failed"
     )
     v = AcdcVerifier(kel_resolver=resolver, trusted_issuer_aids=_TRUSTED)
@@ -181,7 +181,7 @@ def test_grant_rejected_when_kel_unresolvable():
 def test_grant_rejected_when_kel_has_no_current_key():
     """A KEL with no current signing key cannot verify any signature."""
     resolver = MagicMock(spec=KelResolver)
-    resolver.resolve_from_oobis.return_value = {
+    resolver.resolve_trusted.return_value = {
         "aid": "EIssuerAID456",
         "current_public_keys": [],
         "witnesses": [],
@@ -214,7 +214,7 @@ def test_grant_rejected_when_issuer_not_on_allowlist():
         v.verify_grant(forged, subject_aid="EEvilAID")
 
     # Trust gate ran BEFORE KEL resolve — the resolver was never asked.
-    resolver.resolve_from_oobis.assert_not_called()
+    resolver.resolve_trusted.assert_not_called()
     resolver.resolve_from_cesr_stream.assert_not_called()
 
 
@@ -231,7 +231,7 @@ def test_grant_rejected_when_issuer_is_someone_else():
 
     with pytest.raises(CredentialVerificationError, match="trusted-issuer allowlist"):
         v.verify_grant(sneaky, subject_aid="EUser123")
-    resolver.resolve_from_oobis.assert_not_called()
+    resolver.resolve_trusted.assert_not_called()
 
 
 def test_trusted_issuer_set_passes_the_gate():
@@ -241,7 +241,7 @@ def test_trusted_issuer_set_passes_the_gate():
     from app.core.kel_resolver import KelResolutionError
 
     resolver = MagicMock(spec=KelResolver)
-    resolver.resolve_from_oobis.side_effect = KelResolutionError("mock stop")
+    resolver.resolve_trusted.side_effect = KelResolutionError("mock stop")
     v = AcdcVerifier(
         kel_resolver=resolver,
         trusted_issuer_aids=["EIssuerAID456"],
@@ -249,4 +249,4 @@ def test_trusted_issuer_set_passes_the_gate():
     with pytest.raises(CredentialVerificationError, match="KEL unresolvable"):
         v.verify_grant(_grant(), subject_aid="EUser123")
     # Gate passed, resolver WAS called.
-    resolver.resolve_from_oobis.assert_called_once()
+    resolver.resolve_trusted.assert_called_once()
