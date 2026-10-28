@@ -3,6 +3,16 @@ entries:
   ds-login:
   - apiVersion: v2
     appVersion: 0.1.0
+    created: "2026-10-28T14:03:29.342291189Z"
+    description: Login + credential verification service for the Hiro dataspace
+    digest: fe0bd2482d675b247ded54d7af8faa74e7ad977edd655f037bf4a45e9af3d6d0
+    name: ds-login
+    type: application
+    urls:
+    - https://github.com/HIRO-MicroDataCenters-BV/ds-login/releases/download/ds-login-0.1.6/ds-login-0.1.6.tgz
+    version: 0.1.6
+  - apiVersion: v2
+    appVersion: 0.1.0
     created: "2026-10-28T04:56:28.179814106Z"
     description: Login + credential verification service for the Hiro dataspace
     digest: c814696d477be5a7f4a6b3854a8a5e9fd47cec11b854868a1ae2cec5ebe1ee26
@@ -51,4 +61,4 @@ entries:
     urls:
     - https://github.com/HIRO-MicroDataCenters-BV/ds-login/releases/download/ds-login-0.1.1/ds-login-0.1.1.tgz
     version: 0.1.1
-generated: "2026-10-28T04:56:28.179827496Z"
+generated: "2026-10-28T14:03:29.342317167Z"
