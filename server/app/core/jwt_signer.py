@@ -103,7 +103,16 @@ class JwtSigner:
     # ─── JWKs publication ────────────────────────────────────────────
     def jwks(self) -> dict[str, Any]:
         private_key = serialization.load_pem_private_key(self._private_pem, password=None)
-        pub_numbers: RSAPublicNumbers = private_key.public_key().public_numbers()  # type: ignore[attr-defined]
+        # load_pem_private_key returns a union of every private-key type
+        # the cryptography library knows about; this service only ever
+        # signs with RSA so narrow the type explicitly rather than
+        # suppress the whole union-attr family. Fails loudly if a non-
+        # RSA key file is ever handed to the service.
+        if not isinstance(private_key, rsa.RSAPrivateKey):
+            raise TypeError(
+                f"ds-login signing key must be RSA, got {type(private_key).__name__}"
+            )
+        pub_numbers: RSAPublicNumbers = private_key.public_key().public_numbers()
 
         def _b64u(n: int) -> str:
             b = n.to_bytes((n.bit_length() + 7) // 8, "big")
