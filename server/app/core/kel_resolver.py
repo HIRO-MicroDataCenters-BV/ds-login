@@ -220,30 +220,46 @@ _VERSION_RE = re.compile(
 
 
 def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
-    """Parse an OOBI CESR response into a flat KEL state dict.
+    """Walk the full KEL and return the FINAL key state.
 
-    Reads the first KERI event in the stream (the inception) via
-    ``SerderKERI`` and builds the state dict directly from its fields.
-    Deliberately bypasses ``Kevery`` because dkms-bin inlines witness
-    receipts as ``-CAB`` attachments right after the icp's ``-AAB`` sig,
-    which Kevery doesn't accept as a ``rct`` event and so refuses to
-    construct a Kever with ``MissingWitnessSignatureError`` (toad=1,
-    witness sigs []).
+    Processes each KERI event (icp, rot, ixn) in order, verifies the
+    controller signature on each one, and checks that every rotation's
+    new keys match the digest commitment ``n`` from the previous event.
+    The final ``current_public_keys`` reflects every rotation applied —
+    an old key that's been rotated out will not log in. Rahul audit #2.
 
-    Trust model: the icp event is self-addressing — its ``d`` SAID is a
-    digest of the serialised body, and ``i`` equals ``d`` for the icp.
-    If ``d == i == aid`` then the key material in ``k`` is cryptographically
-    bound to the identifier. Verifying the ``-AAB`` sig against ``k[0]``
-    further confirms the controller signed this exact inception. These
-    together are sufficient for the login use case: the subsequent nonce
-    signature from the user proves control of the same key.
+    Why we don't just use Kevery:
+      dkms-bin inlines witness receipts as ``-CAB`` attachments right
+      after each event's ``-AAB`` controller sig instead of emitting them
+      as standalone ``rct`` events. Kevery expects the standalone form,
+      refuses to construct a Kever with ``MissingWitnessSignatureError``
+      (toad=1, witness sigs []), and the whole stream silently escrows
+      to kvy.kevers = {}. Walking the KEL manually sidesteps the
+      inline-receipt pitfall AND processes rotations end-to-end — the
+      previous icp-only resolver dropped them entirely.
 
-    What we DON'T do: witness-receipt verification. For the login flow,
-    the holder's possession of the signing key is the authority — witness
-    receipts matter for ACDCs anchored in a TEL, which is a separate path
-    on the credential verification side.
+    Trust model (per event):
+      * icp — self-addressing; serder.said == serder.pre == aid.
+        Sig verifies against the icp's own k[0] (threshold "1"
+        required; threshold != "1" rejected since login key-usage is
+        single-sig here). The commitment ``n`` is recorded for the
+        next rotation's verification.
+      * rot — new keys. For each new k[i], its digest must match
+        the previous event's n[i] (pre-committed next-key digest).
+        Sig verifies against the NEW k[0]. New ``n`` is recorded.
+      * ixn — no key change. Sig verifies against the still-current
+        k[0]. Doesn't advance key state.
+
+    What we DON'T verify:
+      * witness threshold — handled on the TEL verifier side where
+        witness attestation of ACDC anchoring matters. For login the
+        controller sig IS the authority.
+      * out-of-order events — events here are expected in sequence
+        matching ``s``. Gaps or regressions reject.
+      * multi-sig / weighted thresholds — threshold != "1" rejected.
     """
     try:
+        from keri.core.coring import Diger, Verfer
         from keri.core.indexing import Siger
         from keri.core.serdering import SerderKERI
     except Exception as e:  # pysodium can raise TypeError on Windows
@@ -255,84 +271,218 @@ def _kel_state_from_oobi(oobi: OobiResult, aid: str) -> dict[str, Any]:
         raise KelResolutionError(f"OOBI {oobi.url} returned empty body")
 
     body = bytes(oobi.body)
-    # Locate the first KERI event's version header, then read exactly
-    # the declared size for its serialised body.
-    m = _VERSION_RE.search(body)
-    if m is None:
+    events = _split_kel_events(body, oobi.url)
+    if not events:
         raise KelResolutionError(
             f"OOBI {oobi.url} CESR stream has no KERI event version header"
         )
-    size = int(m.group("size"), 16)
-    event_start = body.rfind(b"{", 0, m.start())
-    if event_start < 0:
-        event_start = m.start()
-    event_body = body[event_start:event_start + size]
-    if len(event_body) < size:
-        raise KelResolutionError(
-            f"OOBI {oobi.url} truncated: declared size {size}, "
-            f"only {len(event_body)} bytes available"
-        )
 
+    # Walk the sequence.
+    current_keys: list[str] = []
+    next_digests: list[str] = []
+    current_sn = -1
+    witnesses: list[str] = []
+
+    for idx, (event_body, attachment) in enumerate(events):
+        try:
+            serder = SerderKERI(raw=event_body)
+        except Exception as e:
+            raise KelResolutionError(
+                f"OOBI {oobi.url}: event #{idx} unparseable: {e}"
+            ) from e
+
+        t = serder.ked.get("t")
+        sn = int(serder.ked.get("s", "0"), 16)
+
+        if idx == 0:
+            # Must be an icp (or dip, out of scope here).
+            if t != "icp":
+                raise KelResolutionError(
+                    f"OOBI {oobi.url} first event is {t!r}, expected 'icp' "
+                    "(delegated inceptions / rotations as the first event "
+                    "aren't supported on this login path yet)"
+                )
+            if serder.said != aid or serder.pre != aid:
+                raise KelResolutionError(
+                    f"icp SAID binding mismatch: event said={serder.said!r} "
+                    f"i={serder.pre!r} but AID={aid!r} — refusing to trust key "
+                    "material not bound to the AID"
+                )
+            if sn != 0:
+                raise KelResolutionError(
+                    f"icp has s={sn}, expected 0"
+                )
+        else:
+            # Later events — same identifier, strictly increasing s.
+            if serder.pre != aid:
+                raise KelResolutionError(
+                    f"event #{idx} binds to {serder.pre!r}, not {aid!r}"
+                )
+            if sn != current_sn + 1:
+                raise KelResolutionError(
+                    f"event #{idx} has s={sn}, expected {current_sn + 1}"
+                )
+
+        # Pull the controller signature out of the attachment group.
+        siger_qb64 = _extract_controller_sig(attachment)
+        if siger_qb64 is None:
+            raise KelResolutionError(
+                f"event #{idx} ({t}) at s={sn} has no controller sig "
+                "attachment (-AAB…) — refusing to trust an unsigned event"
+            )
+
+        if t == "icp":
+            kt = serder.ked.get("kt")
+            if kt != "1":
+                raise KelResolutionError(
+                    f"icp has kt={kt!r}; this verifier only supports kt='1' "
+                    "(single-sig threshold)"
+                )
+            keys = list(serder.ked.get("k") or [])
+            if not keys:
+                raise KelResolutionError(
+                    f"icp from OOBI {oobi.url} carries no signing keys (k=[])"
+                )
+            # Self-signed with its own k[0].
+            _verify_sig(siger_qb64, keys[0], event_body, "icp", oobi.url,
+                        Siger, Verfer)
+            current_keys = keys
+            next_digests = list(serder.ked.get("n") or [])
+            witnesses = list(serder.ked.get("b") or [])
+
+        elif t == "rot":
+            kt = serder.ked.get("kt")
+            if kt != "1":
+                raise KelResolutionError(
+                    f"rot at s={sn} has kt={kt!r}; only kt='1' is supported"
+                )
+            new_keys = list(serder.ked.get("k") or [])
+            if not new_keys:
+                raise KelResolutionError(
+                    f"rot at s={sn} declares no new keys (k=[])"
+                )
+            # Pre-rotation commitment check: digest of each new key
+            # MUST equal the previous event's n[i]. This is the whole
+            # point of KERI's rotation security.
+            for i, new_k in enumerate(new_keys):
+                if i >= len(next_digests):
+                    raise KelResolutionError(
+                        f"rot at s={sn} adds key beyond committed count "
+                        f"({len(next_digests)}) — pre-rotation forgery"
+                    )
+                expected_digest = next_digests[i]
+                actual_digest = Diger(ser=new_k.encode("utf-8")).qb64
+                if actual_digest != expected_digest:
+                    raise KelResolutionError(
+                        f"rot at s={sn} new key {new_k!r} does not match "
+                        f"the previous n[{i}] commitment {expected_digest!r}"
+                    )
+            # Sig over the rot body comes from the NEW k (what the rot
+            # authorises).
+            _verify_sig(siger_qb64, new_keys[0], event_body, f"rot@s={sn}",
+                        oobi.url, Siger, Verfer)
+            current_keys = new_keys
+            next_digests = list(serder.ked.get("n") or [])
+            # Witnesses can change via ba/br fields on rot; recompute.
+            # Simple implementation: apply ba (add) and br (remove).
+            ba = serder.ked.get("ba") or []
+            br = serder.ked.get("br") or []
+            witnesses = [w for w in witnesses if w not in br] + list(ba)
+
+        elif t == "ixn":
+            # Interaction event — same current_keys, same current_n.
+            _verify_sig(siger_qb64, current_keys[0], event_body,
+                        f"ixn@s={sn}", oobi.url, Siger, Verfer)
+
+        else:
+            # drt, dip, etc. — out of scope on this verifier path.
+            raise KelResolutionError(
+                f"event #{idx} at s={sn} has unsupported type {t!r}"
+            )
+
+        current_sn = sn
+
+    # Walked the full KEL successfully. The state reflects every
+    # rotation applied — a rotated-out key will NOT appear in
+    # current_public_keys any more. Rahul audit #2.
+    return {
+        "aid": aid,
+        "current_public_keys": current_keys,
+        "witnesses": witnesses,
+        "sequence_number": current_sn,
+        "signature_verified": True,
+    }
+
+
+def _split_kel_events(body: bytes, oobi_url: str) -> list[tuple[bytes, bytes]]:
+    """Split a CESR stream into (event_body, attachment_bytes) pairs.
+
+    Each event's version header declares its serialised byte length; the
+    bytes that follow until the next event's ``{"v":"KERI`` marker (or
+    end-of-stream) are the attachment group — controller sig, witness
+    receipts, etc. Returned in document order.
+    """
+    event_offsets: list[tuple[int, int]] = []  # (start, size)
+    for m in _VERSION_RE.finditer(body):
+        size = int(m.group("size"), 16)
+        start = body.rfind(b"{", 0, m.start())
+        if start < 0:
+            start = m.start()
+        if start + size > len(body):
+            raise KelResolutionError(
+                f"OOBI {oobi_url} truncated: event at {start} declares "
+                f"size {size} but only {len(body) - start} bytes remain"
+            )
+        event_offsets.append((start, size))
+
+    out: list[tuple[bytes, bytes]] = []
+    for i, (start, size) in enumerate(event_offsets):
+        event_body = body[start:start + size]
+        attach_start = start + size
+        attach_end = event_offsets[i + 1][0] if i + 1 < len(event_offsets) else len(body)
+        attachment = body[attach_start:attach_end]
+        out.append((event_body, attachment))
+    return out
+
+
+def _extract_controller_sig(attachment: bytes) -> str | None:
+    """Pull the first qb64 controller sig body from a CESR attachment.
+
+    ``-AAB`` / ``-AAC`` counter + 88-char qb64 sig body. Returns just
+    the sig body (what KERIpy's ``Siger(qb64=...)`` accepts); the
+    counter prefix would trip the Siger constructor's Matter parser.
+    """
+    for marker in (b"-AAB", b"-AAC"):
+        i = attachment.find(marker)
+        if i >= 0:
+            body = attachment[i + 4 : i + 4 + 88]
+            if len(body) == 88:
+                return body.decode("utf-8", errors="replace")
+    return None
+
+
+def _verify_sig(
+    siger_qb64: str,
+    key_qb64: str,
+    event_body: bytes,
+    label: str,
+    oobi_url: str,
+    Siger: Any,
+    Verfer: Any,
+) -> None:
+    """Verify a controller sig against a key; raise ``KelResolutionError``
+    with a specific label on mismatch. Separate from the walker so the
+    sig-verify branch stays readable."""
     try:
-        serder = SerderKERI(raw=event_body)
+        siger = Siger(qb64=siger_qb64)
+        verfer = Verfer(qb64=key_qb64)
     except Exception as e:
         raise KelResolutionError(
-            f"KERIpy could not parse icp from OOBI {oobi.url}: {e}"
+            f"OOBI {oobi_url} {label}: sig attachment malformed: "
+            f"{type(e).__name__}: {e}"
         ) from e
-
-    if serder.ked.get("t") != "icp":
+    if not verfer.verify(sig=siger.raw, ser=event_body):
         raise KelResolutionError(
-            f"OOBI {oobi.url} first event is {serder.ked.get('t')!r}, "
-            "expected 'icp' (direct inline-KEL resolution handles the "
-            "inception event only; rotations arrive on later logins)"
+            f"OOBI {oobi_url} {label}: controller signature does not "
+            f"verify against expected key {key_qb64!r}"
         )
-    if serder.said != aid or serder.pre != aid:
-        raise KelResolutionError(
-            f"icp SAID binding mismatch: event said={serder.said!r} i={serder.pre!r} "
-            f"but AID={aid!r} — refusing to trust key material not bound to the AID"
-        )
-
-    keys = list(serder.ked.get("k") or [])
-    if not keys:
-        raise KelResolutionError(
-            f"icp from OOBI {oobi.url} carries no signing keys (k=[])"
-        )
-
-    # Verify the controller signature over the icp body, if present.
-    # The attachment immediately follows the body: ``-AAB`` (counter: 1
-    # indexed sig) + 88 chars of qb64 (code 'A' + index + Ed25519 body).
-    tail = body[event_start + size:]
-    siger_qb64: str | None = None
-    cnt_marker = tail.find(b"-A")
-    if cnt_marker >= 0:
-        after_counter = tail[cnt_marker + 4:]
-        if len(after_counter) >= 88:
-            candidate = after_counter[:88].decode("utf-8", errors="replace")
-            # a well-formed indexed Ed25519 sig starts with the 'A' code
-            if candidate.startswith("A"):
-                siger_qb64 = candidate
-    sig_verified = False
-    sig_error: str | None = None
-    if siger_qb64:
-        try:
-            from keri.core.coring import Verfer
-            siger = Siger(qb64=siger_qb64)
-            # k[0] is the primary signing key per threshold "1".
-            verfer = Verfer(qb64=keys[0])
-            if verfer.verify(sig=siger.raw, ser=event_body):
-                sig_verified = True
-            else:
-                sig_error = "signature did not verify against k[0]"
-        except Exception as e:
-            sig_error = f"sig verify failed: {type(e).__name__}: {e}"
-
-    state: dict[str, Any] = {
-        "aid": aid,
-        "current_public_keys": keys,
-        "witnesses": list(serder.ked.get("b") or []),
-        "sequence_number": int(serder.ked.get("s", "0"), 16),
-        "signature_verified": sig_verified,
-    }
-    if sig_error:
-        state["signature_error"] = sig_error
-    return state
