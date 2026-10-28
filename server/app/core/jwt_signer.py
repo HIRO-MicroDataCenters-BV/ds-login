@@ -4,9 +4,10 @@ for local development only."""
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import logging
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +28,12 @@ class JwtSigner:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self._kid = uuid.uuid4().hex[:16]
         self._private_pem = self._load_or_generate_key(settings)
+        self._public_jwk = self._rsa_public_jwk(self._private_pem)
+        # The kid is the key's RFC 7638 thumbprint, not a random value: the
+        # same key gets the same kid after a restart and on every replica, so
+        # verifiers looking keys up by kid keep accepting earlier tokens.
+        self._kid = self._thumbprint(self._public_jwk)
 
     # ─── key loading ─────────────────────────────────────────────────
     @staticmethod
@@ -101,8 +106,10 @@ class JwtSigner:
         return claims
 
     # ─── JWKs publication ────────────────────────────────────────────
-    def jwks(self) -> dict[str, Any]:
-        private_key = serialization.load_pem_private_key(self._private_pem, password=None)
+    @staticmethod
+    def _rsa_public_jwk(private_pem: bytes) -> dict[str, str]:
+        """The public key's required JWK members (`e`, `kty`, `n`)."""
+        private_key = serialization.load_pem_private_key(private_pem, password=None)
         # load_pem_private_key returns a union of every private-key type
         # the cryptography library knows about; this service only ever
         # signs with RSA so narrow the type explicitly rather than
@@ -118,6 +125,17 @@ class JwtSigner:
             b = n.to_bytes((n.bit_length() + 7) // 8, "big")
             return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
+        return {"e": _b64u(pub_numbers.e), "kty": "RSA", "n": _b64u(pub_numbers.n)}
+
+    @staticmethod
+    def _thumbprint(public_jwk: dict[str, str]) -> str:
+        """RFC 7638 JWK thumbprint: SHA-256 over the required members,
+        sorted, no whitespace, base64url without padding."""
+        canonical = json.dumps(public_jwk, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode("utf-8")).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+    def jwks(self) -> dict[str, Any]:
         return {
             "keys": [
                 {
@@ -125,8 +143,8 @@ class JwtSigner:
                     "use": "sig",
                     "alg": "RS256",
                     "kid": self._kid,
-                    "n": _b64u(pub_numbers.n),
-                    "e": _b64u(pub_numbers.e),
+                    "n": self._public_jwk["n"],
+                    "e": self._public_jwk["e"],
                 }
             ]
         }
