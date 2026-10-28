@@ -5,19 +5,25 @@ Verifies a presented IPEX grant end-to-end:
 1. **Parse** the grant envelope (``ipex_grant.parse``). Extract the ACDC, the
    issuer AID, the subject AID, the issuer's signature over the ACDC, and the
    OOBIs needed to reach the issuer's witnesses.
-2. **Subject binding** — the ACDC's ``a.i`` field must equal the AID that
+2. **Trust gate** — the issuer AID must be on the server's trusted-issuer
+   allowlist (``DS__TRUSTED_ISSUER_AIDS``). Without this check, any AID can
+   self-issue role=admin, bind it to itself, sign it with its own key, and
+   present a grant whose KEL it also controls. The chain is cryptographically
+   valid; only policy stops it. Fail-safe default: empty list rejects every
+   grant.
+3. **Subject binding** — the ACDC's ``a.i`` field must equal the AID that
    just signed the login challenge. Prevents a presented credential from
    being bound to someone else.
-3. **Resolve the issuer's KEL** directly from the OOBIs in the grant
-   (``KelResolver.resolve_from_oobis``). The verifier does NOT consult a
-   pre-configured watcher — any DKMS-anchored issuer is acceptable, so the
-   grant itself supplies the location of the issuer's witnesses. This is
-   the open-federation model.
-4. **Verify the issuer signature** against the issuer's **current** signing
+4. **Resolve the issuer's KEL** directly from the OOBIs in the grant
+   (``KelResolver.resolve_from_oobis``) or inline (``iss_kel_cesr``). The
+   verifier does NOT consult a pre-configured watcher — any trusted issuer
+   supplies the location of its own witnesses. This is the open-federation
+   model, gated by step 2.
+5. **Verify the issuer signature** against the issuer's **current** signing
    key as recorded in the KEL we just resolved. This is the step that
    rejects a forged credential and a credential signed with a rotated-away
    key.
-5. **TEL revocation check** — query one of the issuer's witnesses for the
+6. **TEL revocation check** — query one of the issuer's witnesses for the
    current state of the credential's TEL entry (stubbed in Phase 1b; the
    interface is wired, the keriox TEL endpoint is called out as a Phase 1c
    follow-up because the exact witness route is still in flux upstream).
@@ -72,10 +78,14 @@ class AcdcVerifier:
         kel_resolver: KelResolver,
         signature_verifier: SignatureVerifier | None = None,
         witness_client: WitnessClient | None = None,
+        trusted_issuer_aids: list[str] | None = None,
     ) -> None:
         self.kel_resolver = kel_resolver
         self.sig_verifier = signature_verifier or SignatureVerifier()
         self.witness = witness_client or WitnessClient()
+        # Normalise to a set for O(1) lookup. None → empty set →
+        # reject-all (fail-safe default when the caller forgot to pass).
+        self.trusted_issuer_aids: frozenset[str] = frozenset(trusted_issuer_aids or ())
 
     # ─── Primary entry point (new in Phase 1b) ──────────────────────────
 
@@ -95,14 +105,32 @@ class AcdcVerifier:
         except ipex_grant.GrantParseError as e:
             raise CredentialVerificationError(f"grant malformed: {e}") from e
 
-        # 2. Subject binding --------------------------------------------
+        # 2. Trust gate — issuer MUST be on the allowlist ---------------
+        # Without this check, a stranger with a laptop can mint a KERI
+        # AID, self-sign an ACDC claiming role=admin bound to themselves,
+        # and present a grant carrying their own KEL. The chain checks
+        # out cryptographically (self-addressing SAID, self-signed) and
+        # the server would issue a JWT with admin claims.
+        #
+        # This runs BEFORE KEL resolution so an attacker's grant can't
+        # even cause us to parse a malicious inline KEL via KERIpy.
+        # Empty allowlist = reject-all (fail-safe default).
+        if parsed.issuer_aid not in self.trusted_issuer_aids:
+            raise CredentialVerificationError(
+                f"credential issuer {parsed.issuer_aid!r} is not on this "
+                "verifier's trusted-issuer allowlist. Set "
+                "DS__TRUSTED_ISSUER_AIDS to include it if this is a known "
+                "issuer, otherwise the grant is rejected."
+            )
+
+        # 3. Subject binding --------------------------------------------
         if parsed.subject_aid != subject_aid:
             raise CredentialVerificationError(
                 f"credential subject {parsed.subject_aid!r} does not match "
                 f"login AID {subject_aid!r}"
             )
 
-        # 3. Resolve issuer KEL ------------------------------------------
+        # 4. Resolve issuer KEL ------------------------------------------
         # Prefer the inline KEL (dkms-bin facade grants carry it directly
         # in iss_kel_cesr — see ADR 0002). The resolver parses the CESR
         # stream in-process with KERIpy, keeping ADR 0001's verify path
@@ -128,7 +156,7 @@ class AcdcVerifier:
                 f"issuer {parsed.issuer_aid!r} KEL has no current signing key"
             )
 
-        # 4. Verify issuer signature ------------------------------------
+        # 5. Verify issuer signature ------------------------------------
         serialized_acdc = _canonical_acdc_bytes(parsed.acdc)
         sig_valid = False
         last_sig_error: Exception | None = None
@@ -151,7 +179,7 @@ class AcdcVerifier:
                 f"{current_keys} ({last_sig_error})"
             )
 
-        # 5. TEL revocation check ---------------------------------------
+        # 6. TEL revocation check ---------------------------------------
         revocation_checked = self._check_not_revoked(parsed)
 
         # Claims live in one of two shapes depending on the issuer:

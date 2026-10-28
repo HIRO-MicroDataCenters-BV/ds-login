@@ -84,6 +84,29 @@ class Settings(BaseSettings):
         description="If set, verify can read KELs from here when watcher is unavailable.",
     )
 
+    # ─── Credential trust ─────────────────────────────────────────────
+    # Allowlist of AIDs this verifier will accept credentials FROM. The
+    # IPEX grant carries an issuer-signed ACDC along with the issuer's
+    # own KEL (inline or via OOBI); without this gate, *any* AID can
+    # self-issue a credential — including role=admin — bind it to
+    # itself, sign it with its own key, and present a grant whose KEL
+    # it also controls. The whole chain cryptographically checks out
+    # from a protocol standpoint, so the only thing that stops it is
+    # a policy-level "do I trust this issuer at all" check.
+    #
+    # Fail-safe default: empty list rejects every grant. Deployers
+    # MUST set DS__TRUSTED_ISSUER_AIDS to the list of issuer AIDs they
+    # recognise. In HUS this is the ds-credential-issuer's own AID,
+    # discovered at startup from the issuer's /health-check/.
+    trusted_issuer_aids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "AIDs this verifier will accept IPEX grants from. Empty "
+            "list = reject-all (safe default). Set via "
+            "DS__TRUSTED_ISSUER_AIDS as a JSON list."
+        ),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

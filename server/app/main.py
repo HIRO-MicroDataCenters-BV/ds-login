@@ -33,7 +33,23 @@ async def lifespan(app: FastAPI):
         ttl_seconds=settings.challenge_ttl_seconds,
         nonce_bytes=settings.challenge_bytes,
     )
-    app.state.acdc_verifier = AcdcVerifier(kel_resolver=app.state.kel_resolver)
+    app.state.acdc_verifier = AcdcVerifier(
+        kel_resolver=app.state.kel_resolver,
+        trusted_issuer_aids=settings.trusted_issuer_aids,
+    )
+    if not settings.trusted_issuer_aids:
+        if settings.environment == "production":
+            raise RuntimeError(
+                "DS__TRUSTED_ISSUER_AIDS is empty in production. The verifier "
+                "would reject every grant. Set it to the list of issuer AIDs "
+                "this login service recognises (e.g. the HUS "
+                "ds-credential-issuer AID)."
+            )
+        log.warning(
+            "DS__TRUSTED_ISSUER_AIDS empty — the verifier will reject every "
+            "grant. OK outside production for the challenge-only login path; "
+            "credential-based login will not work until this is populated."
+        )
 
     yield
 
