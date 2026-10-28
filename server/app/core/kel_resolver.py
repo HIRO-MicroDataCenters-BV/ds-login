@@ -43,8 +43,76 @@ class KelResolver:
     ) -> None:
         self.settings = settings
         self.witness = witness_client or WitnessClient()
+        self._witness_eids: dict[str, str] = {}
 
     # ─── public API ─────────────────────────────────────────────────────
+
+    def resolve_trusted(
+        self,
+        aid: str,
+        inline_kel: str | bytes | None = None,
+        oobi_urls: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Current key state of ``aid``, taken from a witness we trust.
+
+        A KEL sent by the client is genuine but may be out of date: someone
+        holding a rotated-out key can present the KEL from before the
+        rotation and pass every check on it. So the KEL is fetched from the
+        configured witnesses (``witness_urls``), which hold the latest one.
+
+        In production a KEL that no configured witness has is rejected; the
+        client's copy (``inline_kel`` / ``oobi_urls``) is never used there,
+        and URLs from the client are never fetched. Elsewhere the client's
+        copy is used as a fallback, with a warning.
+        """
+        try:
+            return self.resolve_from_witnesses(aid)
+        except KelResolutionError as e:
+            if self.settings.environment == "production":
+                raise KelResolutionError(
+                    f"KEL of {aid!r} not available from the trusted witnesses "
+                    f"({e}); client-supplied KELs are not accepted in production"
+                ) from e
+            log.warning("trusted witnesses lack the KEL of %s (%s); "
+                        "using the client-supplied KEL", aid, e)
+        if inline_kel:
+            return self.resolve_from_cesr_stream(aid, inline_kel)
+        if oobi_urls:
+            return self.resolve_from_oobis(aid, oobi_urls)
+        return self.resolve(aid)
+
+    def resolve_from_witnesses(self, aid: str) -> dict[str, Any]:
+        """Resolve ``aid``'s KEL from the configured witnesses.
+
+        Each witness serves the KELs it witnesses at
+        ``<url>/oobi/<aid>/witness/<witness-eid>``; the witness's own eid
+        comes from its ``/introduce``. Returns the first KEL that parses.
+        """
+        if not self.settings.witness_urls:
+            raise KelResolutionError("no witness_urls configured")
+        errors: list[str] = []
+        for base in self.settings.witness_urls:
+            base = base.rstrip("/")
+            try:
+                eid = self._witness_eid(base)
+                url = f"{base}/oobi/{aid}/witness/{eid}"
+                state = _kel_state_from_oobi(self.witness.fetch_oobi(url), aid)
+            except (KelResolutionError, WitnessUnreachableError,
+                    httpx.HTTPError, ValueError, KeyError) as e:
+                errors.append(f"{base}: {e}")
+                continue
+            state["source"] = "witness"
+            state["oobi_url"] = url
+            return state
+        raise KelResolutionError("; ".join(errors))
+
+    def _witness_eid(self, base: str) -> str:
+        """The witness's own AID, from ``GET <base>/introduce`` (cached)."""
+        if base not in self._witness_eids:
+            r = httpx.get(f"{base}/introduce", timeout=5.0)
+            r.raise_for_status()
+            self._witness_eids[base] = str(r.json()["eid"])
+        return self._witness_eids[base]
 
     def resolve(self, aid: str) -> dict[str, Any]:
         """Legacy single-AID resolve (watcher-first, disk fallback).
@@ -452,8 +520,8 @@ def _split_kel_events(body: bytes, oobi_url: str) -> list[tuple[bytes, bytes]]:
         attach_start = start + size
         attach_end = event_offsets[i + 1][0] if i + 1 < len(event_offsets) else len(body)
         attachment = body[attach_start:attach_end]
-        m = _EVENT_TYPE_RE.search(event_body)
-        if m is None or m.group("t") not in _KEL_EVENT_TYPES:
+        t = _EVENT_TYPE_RE.search(event_body)
+        if t is None or t.group("t") not in _KEL_EVENT_TYPES:
             continue
         out.append((event_body, attachment))
     return out

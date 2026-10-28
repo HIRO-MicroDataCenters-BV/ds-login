@@ -14,11 +14,10 @@ Verifies a presented IPEX grant end-to-end:
 3. **Subject binding** — the ACDC's ``a.i`` field must equal the AID that
    just signed the login challenge. Prevents a presented credential from
    being bound to someone else.
-4. **Resolve the issuer's KEL** directly from the OOBIs in the grant
-   (``KelResolver.resolve_from_oobis``) or inline (``iss_kel_cesr``). The
-   verifier does NOT consult a pre-configured watcher — any trusted issuer
-   supplies the location of its own witnesses. This is the open-federation
-   model, gated by step 2.
+4. **Resolve the issuer's KEL** from the configured witnesses
+   (``KelResolver.resolve_trusted``), which hold the latest KEL. The
+   grant's inline KEL (``iss_kel_cesr``) and OOBIs are used only outside
+   production, when the witnesses don't have it.
 5. **Verify the issuer signature** against the issuer's **current** signing
    key as recorded in the KEL we just resolved. This is the step that
    rejects a forged credential and a credential signed with a rotated-away
@@ -131,20 +130,16 @@ class AcdcVerifier:
             )
 
         # 4. Resolve issuer KEL ------------------------------------------
-        # Prefer the inline KEL (dkms-bin facade grants carry it directly
-        # in iss_kel_cesr — see ADR 0002). The resolver parses the CESR
-        # stream in-process with KERIpy, keeping ADR 0001's verify path
-        # intact and sidestepping the keriox watcher's limitation of not
-        # serving third-party KELs over plain HTTP.
+        # From the trusted witnesses, like the holder's KEL, so a stale
+        # KEL in the grant can't revive a rotated-out issuer key. The
+        # inline KEL (iss_kel_cesr, ADR 0002) and the grant's OOBIs are
+        # only used outside production when the witnesses lack it.
         try:
-            if parsed.issuer_kel_cesr:
-                issuer_kel = self.kel_resolver.resolve_from_cesr_stream(
-                    parsed.issuer_aid, parsed.issuer_kel_cesr,
-                )
-            else:
-                issuer_kel = self.kel_resolver.resolve_from_oobis(
-                    parsed.issuer_aid, parsed.issuer_oobi_urls
-                )
+            issuer_kel = self.kel_resolver.resolve_trusted(
+                parsed.issuer_aid,
+                inline_kel=parsed.issuer_kel_cesr,
+                oobi_urls=parsed.issuer_oobi_urls,
+            )
         except KelResolutionError as e:
             raise CredentialVerificationError(
                 f"issuer {parsed.issuer_aid!r} KEL unresolvable: {e}"

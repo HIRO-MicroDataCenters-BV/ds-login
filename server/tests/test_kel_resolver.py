@@ -345,6 +345,78 @@ def _settings():
     return Settings(environment="local")
 
 
+# ─── resolve_trusted: KEL from the configured witnesses ────────────────
+
+
+def _rotated_kel():
+    """(aid, icp-only KEL, icp+rot KEL, icp key, rotated-in key)."""
+    from keri.app import habbing
+
+    with habbing.openHby(name="test-trusted", temp=True) as hby:
+        hab = hby.makeHab(name="holder", transferable=True)
+        icp = bytes(hab.makeOwnEvent(sn=0))
+        old_key = hab.kever.verfers[0].qb64
+        hab.rotate()
+        rot = bytes(hab.makeOwnEvent(sn=1))
+        new_key = hab.kever.verfers[0].qb64
+        return hab.pre, icp, icp + rot, old_key, new_key
+
+
+def _trusted_resolver(environment, witness_body):
+    """Resolver with one configured witness answering ``witness_body``
+    (bytes, or an exception to raise)."""
+    client = MagicMock(spec=WitnessClient)
+    if isinstance(witness_body, Exception):
+        client.fetch_oobi.side_effect = witness_body
+    else:
+        client.fetch_oobi.side_effect = lambda url: OobiResult(
+            url=url, content_type="application/cesr", body=witness_body,
+        )
+    r = KelResolver(
+        Settings(environment=environment, witness_urls=["http://w1:3232"]),
+        witness_client=client,
+    )
+    r._witness_eids["http://w1:3232"] = "BWitnessEid"
+    return r, client
+
+
+def test_resolve_trusted_ignores_stale_client_kel():
+    """Stale-KEL attack: the client sends the KEL from before a rotation.
+    The witness's KEL wins, so the rotated-out key is not current."""
+    aid, icp_only, full, old_key, new_key = _rotated_kel()
+    r, client = _trusted_resolver("production", full + _WITNESS_RPY)
+
+    state = r.resolve_trusted(aid, inline_kel=icp_only)
+
+    assert state["source"] == "witness"
+    assert state["current_public_keys"] == [new_key]
+    assert old_key not in state["current_public_keys"]
+    client.fetch_oobi.assert_called_once_with(
+        f"http://w1:3232/oobi/{aid}/witness/BWitnessEid"
+    )
+
+
+def test_resolve_trusted_rejects_in_production_when_witnesses_lack_kel():
+    """Production: no client-supplied KEL or URL is used as a fallback."""
+    aid, icp_only, _, _, _ = _rotated_kel()
+    r, client = _trusted_resolver(
+        "production", WitnessUnreachableError("HTTP 404"),
+    )
+    with pytest.raises(KelResolutionError, match="not accepted in production"):
+        r.resolve_trusted(aid, inline_kel=icp_only,
+                          oobi_urls=["http://attacker.example/oobi"])
+    # Only the configured witness was asked; the client's URL never fetched.
+    assert client.fetch_oobi.call_count == 1
+
+
+def test_resolve_trusted_falls_back_to_client_kel_outside_production():
+    aid, icp_only, _, old_key, _ = _rotated_kel()
+    r, _ = _trusted_resolver("local", WitnessUnreachableError("HTTP 404"))
+    state = r.resolve_trusted(aid, inline_kel=icp_only)
+    assert state["source"] == "inline-cesr"
+    assert state["current_public_keys"] == [old_key]
+
+
 def test_resolve_from_oobis_tries_each_url_in_order(issuer_cesr_stream):
     """First URL fails, second succeeds, third isn't called."""
     aid, cesr = issuer_cesr_stream
