@@ -142,17 +142,23 @@ def _grant(subject_aid="EUser123", **cred_overrides):
     }
 
 
+# The grants in the following tests all claim issuer EIssuerAID456 — put
+# it on the trust allowlist so the trust-gate step passes and tests
+# exercise their intended downstream behaviour. The gate itself is
+# tested separately below.
+_TRUSTED = ["EIssuerAID456"]
+
+
 def test_grant_rejected_when_subject_mismatch():
-    """Subject binding runs before KEL resolution so a mismatch doesn't
-    waste a witness round-trip."""
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
+    """Subject binding runs after the trust gate but before KEL resolution."""
+    v = AcdcVerifier(kel_resolver=_resolver_stub(), trusted_issuer_aids=_TRUSTED)
     bad = _grant(subject_aid="ESomeoneElse")
     with pytest.raises(CredentialVerificationError, match="does not match"):
         v.verify_grant(bad, subject_aid="EUser123")
 
 
 def test_grant_rejected_when_missing_oobis():
-    v = AcdcVerifier(kel_resolver=_resolver_stub())
+    v = AcdcVerifier(kel_resolver=_resolver_stub(), trusted_issuer_aids=_TRUSTED)
     bad = _grant()
     bad["iss_oobis"]["witness_urls"] = []
     with pytest.raises(CredentialVerificationError, match="malformed"):
@@ -167,7 +173,7 @@ def test_grant_rejected_when_kel_unresolvable():
     resolver.resolve_from_oobis.side_effect = KelResolutionError(
         "all 1 OOBI URL(s) failed"
     )
-    v = AcdcVerifier(kel_resolver=resolver)
+    v = AcdcVerifier(kel_resolver=resolver, trusted_issuer_aids=_TRUSTED)
     with pytest.raises(CredentialVerificationError, match="KEL unresolvable"):
         v.verify_grant(_grant(), subject_aid="EUser123")
 
@@ -182,6 +188,65 @@ def test_grant_rejected_when_kel_has_no_current_key():
         "sequence_number": 0,
         "source": "oobi",
     }
-    v = AcdcVerifier(kel_resolver=resolver)
+    v = AcdcVerifier(kel_resolver=resolver, trusted_issuer_aids=_TRUSTED)
     with pytest.raises(CredentialVerificationError, match="no current signing key"):
         v.verify_grant(_grant(), subject_aid="EUser123")
+
+
+# ─── Trust-gate (Rahul audit #1 — critical bypass) ──────────────────────
+
+
+def test_grant_rejected_when_issuer_not_on_allowlist():
+    """Any AID can self-issue role=admin — the only thing that blocks the
+    forged JWT is the trust-gate. Empty allowlist = reject-all.
+
+    Also verifies the KEL resolver is NEVER consulted when the trust gate
+    fails — otherwise a malicious inline KEL could be parsed with KERIpy
+    before we even looked at who the issuer claimed to be.
+    """
+    resolver = MagicMock(spec=KelResolver)
+    v = AcdcVerifier(kel_resolver=resolver, trusted_issuer_aids=[])
+    # Attacker's self-issued grant claims EEvilAID as issuer AND subject.
+    forged = _grant(subject_aid="EEvilAID")
+    forged["acdc"]["i"] = "EEvilAID"  # issuer == attacker
+
+    with pytest.raises(CredentialVerificationError, match="not on this verifier's trusted-issuer allowlist"):
+        v.verify_grant(forged, subject_aid="EEvilAID")
+
+    # Trust gate ran BEFORE KEL resolve — the resolver was never asked.
+    resolver.resolve_from_oobis.assert_not_called()
+    resolver.resolve_from_cesr_stream.assert_not_called()
+
+
+def test_grant_rejected_when_issuer_is_someone_else():
+    """A known-good issuer in the allowlist doesn't bless any grant that
+    presents a DIFFERENT issuer. Each issuer AID is explicit."""
+    resolver = MagicMock(spec=KelResolver)
+    v = AcdcVerifier(
+        kel_resolver=resolver,
+        trusted_issuer_aids=["EHiroIssuerAID"],  # only this one is trusted
+    )
+    sneaky = _grant(subject_aid="EUser123")
+    sneaky["acdc"]["i"] = "EDifferentIssuer"  # trying to piggyback
+
+    with pytest.raises(CredentialVerificationError, match="trusted-issuer allowlist"):
+        v.verify_grant(sneaky, subject_aid="EUser123")
+    resolver.resolve_from_oobis.assert_not_called()
+
+
+def test_trusted_issuer_set_passes_the_gate():
+    """Sanity check: the gate doesn't block legitimate issuers. The grant
+    still fails later (KEL resolution is mocked to fail), but it got past
+    step 2 — proving the allowlist membership logic itself works."""
+    from app.core.kel_resolver import KelResolutionError
+
+    resolver = MagicMock(spec=KelResolver)
+    resolver.resolve_from_oobis.side_effect = KelResolutionError("mock stop")
+    v = AcdcVerifier(
+        kel_resolver=resolver,
+        trusted_issuer_aids=["EIssuerAID456"],
+    )
+    with pytest.raises(CredentialVerificationError, match="KEL unresolvable"):
+        v.verify_grant(_grant(), subject_aid="EUser123")
+    # Gate passed, resolver WAS called.
+    resolver.resolve_from_oobis.assert_called_once()
