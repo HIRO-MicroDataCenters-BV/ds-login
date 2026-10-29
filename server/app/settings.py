@@ -119,6 +119,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Websites whose browser code may call /login/* (CORS). The website signs
+    # the nonce in the browser and posts to this service from its own origin.
+    cors_allowed_origins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Website origins allowed to call this service from a browser, "
+            "e.g. [\"https://dev.nextgen.hiro-develop.nl\"], or [\"*\"] for "
+            "every website. Empty = no CORS headers (browsers on other sites "
+            "are refused). Set via DS__CORS_ALLOWED_ORIGINS as a JSON list."
+        ),
+    )
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     # mypy can't see that pydantic BaseSettings pulls every field's

@@ -5,6 +5,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .core.acdc_verifier import AcdcVerifier
 from .core.revocation_client import RevocationClient
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     logging.basicConfig(level=settings.log_level)
 
     log.info("ds-login starting · env=%s watcher=%s", settings.environment, settings.watcher_url)
+    log.info("CORS allowed for: %s", ", ".join(settings.cors_allowed_origins) or "none")
 
     # Build singletons once, store on app.state for dependency injection.
     # Order matters: the ACDC verifier depends on the KEL resolver.
@@ -80,6 +82,30 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+
+def add_cors(app: FastAPI, origins: list[str]) -> None:
+    """Let the listed website origins call the API from a browser.
+
+    ``["*"]`` allows every website (like the catalog and search services);
+    an exact list allows only those. No cookies are involved (the website
+    sends the JWT in a header), so credentials stay off; only the methods
+    and headers the login uses."""
+    if not origins:
+        return
+    if "*" in origins:
+        origins = ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "Authorization"],
+    )
+
+
+add_cors(app, get_settings().cors_allowed_origins)
 
 app.include_router(health_router)
 app.include_router(jwks_router)

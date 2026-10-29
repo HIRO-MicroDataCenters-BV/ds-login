@@ -67,6 +67,15 @@ trustedIssuerAids: []
 #     EAjRk4pg98-KSwb9_NjBepdIL4Xx3bznhmQDBGCRLU4G: http://ds-credential-issuer:8080
 issuerStatusUrls: {}
 
+# Websites whose browser code calls ds-login (/login/challenge, /login/verify).
+# Emitted as DS__CORS_ALLOWED_ORIGINS (JSON). Exact origins, or ["*"] for every
+# website (like catalog and search); empty = no CORS headers, so browsers on
+# other sites cannot call it. Example:
+#   corsAllowedOrigins:
+#     - https://dev.nextgen.hiro-develop.nl
+#     - https://nextgen.hiro-develop.nl
+corsAllowedOrigins: []
+
 resources:
   limits:
     cpu: 500m

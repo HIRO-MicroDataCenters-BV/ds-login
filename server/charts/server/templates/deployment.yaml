@@ -55,6 +55,9 @@ spec:
             # Revocation status per trusted issuer (fail closed).
             - name: DS__ISSUER_STATUS_URLS
               value: {{ .Values.issuerStatusUrls | toJson | quote }}
+            # Websites allowed to call from a browser (CORS); empty = none.
+            - name: DS__CORS_ALLOWED_ORIGINS
+              value: {{ .Values.corsAllowedOrigins | toJson | quote }}
           {{- if .Values.jwt.signingKeySecretName }}
           volumeMounts:
             - name: signing-key
